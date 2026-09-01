@@ -32,6 +32,7 @@ MODEL_MAPPING = {
     "hf": "lm_eval.models.huggingface:HFLM",
     "hf-audiolm-qwen": "lm_eval.models.hf_audiolm:HFAudioLM",
     "hf-auto": "lm_eval.models.huggingface:HFLM",
+    "hf-diffusion": "lm_eval.models.hf_diffusion:HFDiffusionLM",
     "hf-mistral3": "lm_eval.models.mistral3:Mistral3LM",
     "hf-multimodal": "lm_eval.models.hf_vlms:HFMultimodalLM",
     "huggingface": "lm_eval.models.huggingface:HFLM",
