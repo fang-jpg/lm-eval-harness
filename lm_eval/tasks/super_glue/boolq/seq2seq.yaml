@@ -8,12 +8,12 @@ training_split: train
 validation_split: validation
 doc_to_text: "{{passage}}\nQuestion: {{question}}?\nAnswer:"
 doc_to_target: label
-doc_to_choice: [' no', ' yes']
-target_delimiter: ""
+doc_to_choice: ["no", "yes"]
+target_delimiter: " "
 generation_kwargs:
+  max_gen_toks: 32
   until:
-    - "\n\n"
-    - "\n"
+    - "</s>"
   do_sample: false
   temperature: 0.0
 metric_list:
@@ -22,5 +22,10 @@ metric_list:
     higher_is_better: true
     ignore_case: true
     ignore_punctuation: true
+filter_list:
+  - name: get_response
+    filter:
+      - function: boolq-answer-regex
+      - function: take_first
 metadata:
-  version: 0.0
+  version: 1.0

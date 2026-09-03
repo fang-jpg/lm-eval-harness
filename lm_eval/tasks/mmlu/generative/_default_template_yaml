@@ -4,12 +4,14 @@ fewshot_split: dev
 fewshot_config:
   sampler: first_n
 output_type: generate_until
-doc_to_text: "{{question.strip()}}\nA. {{choices[0]}}\nB. {{choices[1]}}\nC. {{choices[2]}}\nD. {{choices[3]}}\nAnswer:"
+doc_to_text: "Question: {{question.strip()}}\nA. {{choices[0]}}\nB. {{choices[1]}}\nC. {{choices[2]}}\nD. {{choices[3]}}\nAnswer:"
 doc_to_target: "{{['A', 'B', 'C', 'D'][answer]}}"
 generation_kwargs:
+  max_gen_toks: 32
   until:
     - "</s>"
-    - "\n"
+  do_sample: false
+  temperature: 0.0
 metric_list:
   - metric: exact_match
     aggregation: mean
@@ -19,14 +21,7 @@ metric_list:
 filter_list:
   - name: get_response
     filter:
-      # Filter everything after the first break line
-      - function: "regex"
-        regex_pattern: "^(.*?)(?=\\n|$)"
-      # Remove leading white spaces
-      - function: remove_whitespace
-      # function to ignore right white spaces or line breaks
-      - function: "regex"
-        regex_pattern: "^(.*?)\\s*$"
+      - function: mmlu-answer-regex
       - function: take_first
 metadata:
-  version: 3.0
+  version: 4.0

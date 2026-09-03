@@ -96,14 +96,15 @@ run_task() {
     "$@"
 }
 
-# MMLU and BoolQ call hf-diffusion conditional likelihood.  Single-token
-# answer choices share one masked forward per question.
-task_selected mmlu && run_task mmlu 5
+# MMLU and BoolQ must exercise the same block_diff generation path as the
+# free-form tasks.  The stock `mmlu` and `boolq` aliases are multiple-choice
+# likelihood tasks and are not valid for this checkpoint's diffusion mode.
+task_selected mmlu && run_task mmlu_generative 5
 
-# GSM8K, HumanEval and BBH call block-diffusion generate_until.
+# All five tasks now call block-diffusion generate_until.
 task_selected gsm8k && run_task gsm8k 5
 task_selected humaneval && run_task humaneval 0 --confirm_run_unsafe_code
-task_selected boolq && run_task boolq 5
+task_selected boolq && run_task boolq-seq2seq 5
 task_selected bbh && run_task bbh 3
 
 echo "Diffusion evaluation finished. Results: ${RUN_OUTPUT}"

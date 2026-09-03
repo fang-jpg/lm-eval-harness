@@ -9,10 +9,17 @@ The backend has two evaluation paths:
 
 - `generate_until` uses causal prompt/KV-cache processing between blocks and
   bidirectional masked-token denoising inside every generated block.
-- `loglikelihood` uses masked conditional-likelihood estimation. Single-token
-  answer choices (MMLU and BoolQ) use one exact masked forward per question.
-  Longer continuations use the Monte Carlo estimator from the official LLaDA
-  evaluation implementation.
+- `loglikelihood` uses LLaDA-style masked conditional-likelihood estimation.
+  This path is not used by the five-task script because the MindSpeed Qwen3
+  checkpoint is trained with the `block_diff` `[noisy, original]` layout and
+  its special block attention mask.
+
+In particular, the stock `mmlu` and `boolq` tasks are multiple-choice
+likelihood tasks. The script selects `mmlu_generative` and `boolq-seq2seq`
+instead, so all five benchmarks exercise `generate_until`. MMLU uses the same
+prompt prefix and A-D answer extraction rules as MindSpeed-LLM's
+`evaluate_qwen3_diffusion.py`; BoolQ similarly extracts a generated `yes` or
+`no`. Both tasks generate at most 32 tokens (one default diffusion block).
 
 The model is loaded with standard `AutoModelForCausalLM`. The exported
 checkpoint must therefore retain the standard backbone and `lm_head` parameter
@@ -51,10 +58,8 @@ The script supports these environment overrides:
 - `DIFFUSION_TEMPERATURE`, `THRESHOLD`, `TOP_K`, `TOP_P`: sampling controls.
   A task's `do_sample: false` generation setting takes precedence and keeps the
   five-task suite deterministic.
-- `MC_NUM`: Monte Carlo samples for multi-token conditional likelihood;
-  default `128`. It does not increase the cost of single-token choices.
-- `MC_BATCH_SIZE`: likelihood-estimation microbatch size; lower this after an
-  out-of-memory error.
+- `MC_NUM` and `MC_BATCH_SIZE`: only affect custom likelihood tasks; they are
+  not used by the five-task generation suite.
 - `LIMIT`: harness sample limit for smoke tests.
 - `OUTPUT_ROOT`: result root; default `./eval_results_diffusion`.
 - `MODEL_DEVICE`: explicit single-process device. The script automatically uses
@@ -65,3 +70,8 @@ The script supports these environment overrides:
 different lengths, while block-diffusion KV-cache generation is performed one
 unpadded prompt at a time. Multi-NPU execution still provides data parallelism
 through `accelerate launch`.
+
+For an AR-versus-diffusion comparison, rerun the AR model with
+`mmlu_generative` and `boolq-seq2seq` as well. The stock AR results from
+`mmlu`/`boolq` use option likelihood and are not directly comparable with the
+generation metrics (`exact_match,get_response`).

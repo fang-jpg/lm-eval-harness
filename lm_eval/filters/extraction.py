@@ -119,6 +119,77 @@ class WhitespaceFilter(Filter):
         return [filter_set(resp) for resp in resps]
 
 
+@register_filter("mmlu-answer-regex")
+class MMLUAnswerRegexFilter(Filter):
+    """Extract an A-D answer using MindSpeed's Qwen3 diffusion rules.
+
+    This mirrors ``extract_answer`` in MindSpeed-LLM's
+    ``evaluate_qwen3_diffusion.py``.  Keeping it as an lm-eval filter lets a
+    generative MMLU task accept outputs such as ``Answer: B`` and ``(C)``
+    without changing the model's generated text.
+    """
+
+    _answer_patterns = (
+        re.compile(r"(?i)answer\s*is\s*[：:]\s*([A-D])"),
+        re.compile(r"(?i)answer\s*[：:]\s*([A-D])"),
+        re.compile(r"(?i)^\s*([A-D])\s*[.。]?\s*$"),
+        re.compile(r"(?i)[\(（]\s*([A-D])\s*[\)）]"),
+        re.compile(r"(?i)([A-D])\s*[.。]?\s*$"),
+    )
+
+    def __init__(self, fallback: str = "[invalid]") -> None:
+        self.fallback = fallback
+
+    def apply(
+        self, resps: Iterable[Sequence[str]], docs: Sequence[dict[str, Any]]
+    ) -> list[list[str]]:
+        del docs
+
+        def extract(resp: str) -> str:
+            if not isinstance(resp, str):
+                return self.fallback
+            text = resp.strip()
+            for pattern in self._answer_patterns:
+                match = pattern.search(text)
+                if match:
+                    return match.group(1).upper()
+            return self.fallback
+
+        return [[extract(resp) for resp in response_set] for response_set in resps]
+
+
+@register_filter("boolq-answer-regex")
+class BoolQAnswerRegexFilter(Filter):
+    """Extract a generated ``yes``/``no`` answer for BoolQ."""
+
+    _answer_patterns = (
+        re.compile(r"(?i)answer\s*is\s*[：:]?\s*(yes|no)\b"),
+        re.compile(r"(?i)answer\s*[：:]\s*(yes|no)\b"),
+        re.compile(r"(?i)^\s*(yes|no)\b"),
+        re.compile(r"(?i)\b(yes|no)\s*[.!。]?\s*$"),
+    )
+
+    def __init__(self, fallback: str = "[invalid]") -> None:
+        self.fallback = fallback
+
+    def apply(
+        self, resps: Iterable[Sequence[str]], docs: Sequence[dict[str, Any]]
+    ) -> list[list[str]]:
+        del docs
+
+        def extract(resp: str) -> str:
+            if not isinstance(resp, str):
+                return self.fallback
+            text = resp.strip()
+            for pattern in self._answer_patterns:
+                match = pattern.search(text)
+                if match:
+                    return match.group(1).lower()
+            return self.fallback
+
+        return [[extract(resp) for resp in response_set] for response_set in resps]
+
+
 @register_filter("multi_choice_regex")
 class MultiChoiceRegexFilter(RegexFilter):
     """Extract a model's answer on multiple choice questions with letter answers.
