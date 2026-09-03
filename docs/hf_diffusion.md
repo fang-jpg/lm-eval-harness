@@ -19,7 +19,9 @@ likelihood tasks. The script selects `mmlu_generative` and `boolq-seq2seq`
 instead, so all five benchmarks exercise `generate_until`. MMLU uses the same
 prompt prefix and A-D answer extraction rules as MindSpeed-LLM's
 `evaluate_qwen3_diffusion.py`; BoolQ similarly extracts a generated `yes` or
-`no`. Both tasks generate at most 32 tokens (one default diffusion block).
+`no`. Both tasks denoise at most 32 tokens (one default diffusion block), then
+score only the first generated line. This prevents a continuation such as a
+new `Question:` from contributing an unrelated answer label.
 
 The model is loaded with standard `AutoModelForCausalLM`. The exported
 checkpoint must therefore retain the standard backbone and `lm_head` parameter

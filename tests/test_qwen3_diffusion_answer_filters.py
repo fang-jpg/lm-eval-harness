@@ -22,6 +22,8 @@ def test_mmlu_answer_filter_matches_mindspeed_extractor():
         "The answer is: C",
         "After checking the options, I choose (D).",
         "Reasoning finished; the answer is A.",
+        " D\n\nQuestion: generated continuation\nA. 0\nB. ",
+        " B\n\nQuestion: generated continuation\nA. ",
         "No valid option",
     ]
 
@@ -31,6 +33,8 @@ def test_mmlu_answer_filter_matches_mindspeed_extractor():
         ["C"],
         ["D"],
         ["A"],
+        ["D"],
+        ["B"],
         ["[invalid]"],
     ]
 
@@ -41,6 +45,7 @@ def test_boolq_answer_filter_accepts_direct_and_explained_answers():
         "No, the passage contradicts it.",
         "Answer: YES",
         "The answer is no.",
+        " yes\n\nQuestion: generated continuation",
         "Reasoning only",
     ]
 
@@ -49,6 +54,7 @@ def test_boolq_answer_filter_accepts_direct_and_explained_answers():
         ["no"],
         ["yes"],
         ["no"],
+        ["yes"],
         ["[invalid]"],
     ]
 
@@ -63,6 +69,7 @@ def test_mmlu_and_boolq_use_one_block_generate_until_configs():
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert config["output_type"] == "generate_until"
         assert config["generation_kwargs"]["max_gen_toks"] == 32
+        assert "\n" in config["generation_kwargs"]["until"]
         assert config["generation_kwargs"]["do_sample"] is False
         assert config["generation_kwargs"]["temperature"] == 0.0
         assert config["filter_list"][0]["name"] == "get_response"

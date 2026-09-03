@@ -148,7 +148,12 @@ class MMLUAnswerRegexFilter(Filter):
         def extract(resp: str) -> str:
             if not isinstance(resp, str):
                 return self.fallback
-            text = resp.strip()
+            # A 32-token diffusion block often continues with another MMLU
+            # ``Question:`` after emitting the answer.  Only the first
+            # non-empty generated line belongs to the current item; scanning
+            # the whole block can accidentally capture an A-D label from the
+            # generated next question.
+            text = resp.strip().splitlines()[0].strip()
             for pattern in self._answer_patterns:
                 match = pattern.search(text)
                 if match:
@@ -180,7 +185,9 @@ class BoolQAnswerRegexFilter(Filter):
         def extract(resp: str) -> str:
             if not isinstance(resp, str):
                 return self.fallback
-            text = resp.strip()
+            # Match the current answer only, not a continuation generated
+            # later in the diffusion block.
+            text = resp.strip().splitlines()[0].strip()
             for pattern in self._answer_patterns:
                 match = pattern.search(text)
                 if match:

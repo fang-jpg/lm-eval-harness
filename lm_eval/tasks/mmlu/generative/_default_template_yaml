@@ -9,6 +9,7 @@ doc_to_target: "{{['A', 'B', 'C', 'D'][answer]}}"
 generation_kwargs:
   max_gen_toks: 32
   until:
+    - "\n"
     - "</s>"
   do_sample: false
   temperature: 0.0
