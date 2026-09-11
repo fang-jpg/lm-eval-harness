@@ -77,3 +77,4 @@ htmlcov/
 
 # Agent tooling
 .claude/settings.local.json
+eval_results_diffusion/

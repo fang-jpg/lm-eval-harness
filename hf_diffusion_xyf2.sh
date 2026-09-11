@@ -1,32 +1,55 @@
 #!/usr/bin/env bash
+
+# ==============================
+# 1. Load CANN
+# ==============================
+
+set +e
+set +u
+
+export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+source /share/f50058111/activate_cann_910b_9.1.sh
+
 set -euo pipefail
 
-# Diffusion evaluation for the five tasks used by hf_xyf2.sh.
-#
-# Required:
-#   MODEL_PATH=/path/to/exported/hf/checkpoint bash hf_diffusion_xyf2.sh
-#
-# Useful smoke test:
-#   TASKS=mmlu,gsm8k LIMIT=8 MODEL_PATH=/path/to/checkpoint \
-#     ASCEND_RT_VISIBLE_DEVICES=0 bash hf_diffusion_xyf2.sh
+echo "===== CANN environment loaded ====="
+echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
+echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
 
-export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
-export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
-export HF_EVALUATE_OFFLINE="${HF_EVALUATE_OFFLINE:-1}"
-export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
-export HF_ALLOW_CODE_EVAL="${HF_ALLOW_CODE_EVAL:-1}"
+python - <<'PY'
+import torch
+import torch_npu
+print("torch =", torch.__version__)
+print("NPU available =", torch.npu.is_available())
+PY
+
+# ==============================
+# 2. HuggingFace offline cache
+# ==============================
+
+export HF_HOME=/share/f50058111/huggingface_cache
+export HF_HUB_CACHE=/share/f50058111/huggingface_cache/hub
+export HF_DATASETS_CACHE=/share/f50058111/huggingface_cache/datasets
+
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export HF_EVALUATE_OFFLINE=1
+
+export TOKENIZERS_PARALLELISM=false
+export HF_ALLOW_CODE_EVAL=1
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-3600}"
 export HCCL_EXEC_TIMEOUT="${HCCL_EXEC_TIMEOUT:-3600}"
 export HCCL_TIMEOUT="${HCCL_TIMEOUT:-3600}"
 
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
 
-MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/global_step_102500/}"
+MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/phase4_cpt_ar_duffision_0814/models/global_step_102500/}"
 TASKS="${TASKS:-mmlu,gsm8k,humaneval,boolq,bbh}"
-BLOCK_LENGTH="${BLOCK_LENGTH:-32}"
+BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-}"
 DIFFUSION_TEMPERATURE="${DIFFUSION_TEMPERATURE:-0.0}"
@@ -99,12 +122,12 @@ run_task() {
 # MMLU and BoolQ must exercise the same block_diff generation path as the
 # free-form tasks.  The stock `mmlu` and `boolq` aliases are multiple-choice
 # likelihood tasks and are not valid for this checkpoint's diffusion mode.
-task_selected mmlu && run_task mmlu_generative 5
+# task_selected mmlu && run_task mmlu_generative 5
 
 # All five tasks now call block-diffusion generate_until.
 task_selected gsm8k && run_task gsm8k 5
-task_selected humaneval && run_task humaneval 0 --confirm_run_unsafe_code
-task_selected boolq && run_task boolq-seq2seq 5
-task_selected bbh && run_task bbh 3
+# task_selected humaneval && run_task humaneval 0 --confirm_run_unsafe_code
+# task_selected boolq && run_task boolq-seq2seq 5
+# task_selected bbh && run_task bbh 3
 
 echo "Diffusion evaluation finished. Results: ${RUN_OUTPUT}"
