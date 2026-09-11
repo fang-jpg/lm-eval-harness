@@ -5,8 +5,14 @@
 # CANN_ENV, HF_HOME, BLOCK_LENGTH, DIFFUSION_STEPS, MASK_TOKEN_ID, MODEL_DEVICE.
 # Requires the reference script's Python environment plus matplotlib.
 set -eo pipefail
+trap 'printf "[ERROR] line %s, exit %s\n" "$LINENO" "$?" >&2' ERR
+echo "[startup] GSM8K evaluation starting"
 cd "$(dirname "${BASH_SOURCE[0]}")"
 if [[ "${DRY_RUN:-0}" != 1 ]]; then
+  echo "[startup] Loading CANN: ${CANN_ENV:-/share/f50058111/activate_cann_910b_9.1.sh}"
+  # Match the reference setup script: vendor activation may use unset variables
+  # or return nonzero from optional probes. Validate the NPU below instead.
+  set +e
   set +u
   export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
   source "${CANN_ENV:-/share/f50058111/activate_cann_910b_9.1.sh}"
@@ -20,12 +26,14 @@ export TOKENIZERS_PARALLELISM=false
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-3600}"
 export HCCL_EXEC_TIMEOUT="${HCCL_EXEC_TIMEOUT:-3600}"
 export HCCL_TIMEOUT="${HCCL_TIMEOUT:-3600}"
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
 export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
 
-python - <<'PY'
+echo "[startup] Python: $(command -v python)"
+echo "[startup] NPU devices: ${ASCEND_RT_VISIBLE_DEVICES}"
+python -u - <<'PY'
 import csv
 import json
 import math
@@ -84,11 +92,13 @@ if dry_run:
     raise SystemExit(0)
 
 # Fail before starting expensive evaluation if any required model is missing.
+print('[startup] Checking all 24 checkpoints...', flush=True)
 missing = [str(root / f'global_step_{step}' / 'config.json')
            for root in roots.values() for step in steps
            if not (root / f'global_step_{step}' / 'config.json').is_file()]
 if missing:
     raise SystemExit('Missing HF checkpoints (expected global_step_<step>):\n' + '\n'.join(missing))
+print('[startup] Importing matplotlib, torch and torch_npu...', flush=True)
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -96,6 +106,7 @@ import torch
 import torch_npu
 if not torch.npu.is_available():
     raise SystemExit('NPU is unavailable; check the CANN/Python environment.')
+print('[startup] NPU available; starting evaluation.', flush=True)
 
 output.mkdir(parents=True, exist_ok=True)
 # Refuse to mix a new evaluation with old final results.
@@ -124,19 +135,15 @@ try:
         for step in steps:
             for mode in ('AR', 'Diffusion'):
                 print(f'[{len(rows)+1}/48] {run} step={step} {mode}', flush=True)
-                # Temporary aggregate JSON and console output are removed even on failure.
+                # Temporary aggregate JSON is removed even on failure.
+                # Progress goes directly to the terminal, with no saved console log.
                 # No --log_samples, response cache, or persistent evaluation log.
                 with tempfile.TemporaryDirectory(prefix='gsm8k-eval-') as tmp:
                     dest = Path(tmp) / 'metrics'
                     cmd = command(run, step, mode, dest)
-                    with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as log:
-                        result = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
-                        if result.returncode:
-                            log.seek(0, 2)
-                            size = log.tell()
-                            log.seek(max(0, size - 16000))
-                            print(log.read(), file=sys.stderr)
-                            raise RuntimeError(f'{run} step={step} {mode} failed: exit {result.returncode}')
+                    result = subprocess.run(cmd, env=dict(env, PYTHONUNBUFFERED='1'))
+                    if result.returncode:
+                        raise RuntimeError(f'{run} step={step} {mode} failed: exit {result.returncode}')
                     files = list(dest.rglob('results*.json'))
                     if len(files) != 1:
                         raise RuntimeError(f'Expected one aggregate result, found {len(files)}')
