@@ -1,30 +1,33 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# GSM8K Baseline AR Evaluation
+# GSM8K Baseline AR Evaluation (0920)
 #
 # 默认：
 #   模型：
 #   /share/dataset/x00840191/model_train/ckpt/
-#       qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_xxx
+#       qwen3_1.7b_ar_cpt_baseline_0920/models/global_step_xxx
 #
 #   checkpoints:
-#       500, 1000, ..., 10500
+#       自动发现 models/global_step_*/config.json 已完整导出的 checkpoint
 #
 #   devices:
 #       NPU 0~7
 #
 # 使用：
-#   bash eval_gsm8k_baseline_0916.sh
+#   bash eval_batch_draw.sh
 #
 # 单卡调试：
-#   ASCEND_RT_VISIBLE_DEVICES=6 bash eval_gsm8k_baseline_0916.sh
+#   ASCEND_RT_VISIBLE_DEVICES=6 bash eval_batch_draw.sh
 #
 # 指定输出：
-#   OUTPUT_ROOT=./eval_results_test bash eval_gsm8k_baseline_0916.sh
+#   OUTPUT_ROOT=./eval_results_test bash eval_batch_draw.sh
+#
+# 只评测指定 checkpoint（逗号或空格分隔）：
+#   STEPS=5000 bash eval_batch_draw.sh
 #
 # 预览命令：
-#   DRY_RUN=1 bash eval_gsm8k_baseline_0916.sh
+#   STEPS=5000 DRY_RUN=1 bash eval_batch_draw.sh
 # ==============================================================================
 
 set -eo pipefail
@@ -97,7 +100,7 @@ export HCCL_TIMEOUT="${HCCL_TIMEOUT:-3600}"
 # MASTER_PORT=29513 \
 # HCCL_HOST_SOCKET_PORT_RANGE=62300-62399 \
 # HCCL_NPU_SOCKET_PORT_RANGE=63300-63399 \
-# bash eval_gsm8k_baseline_0916.sh
+# bash eval_batch_draw.sh
 #
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 
@@ -163,11 +166,13 @@ dry_run = env.get("DRY_RUN", "0") == "1"
 # Baseline 模型目录
 # ------------------------------------------------------------------------------
 
+run_name = env.get("RUN_NAME", "0920")
+
 root = Path(
     env.get(
-        "ROOT_0916",
+        "MODEL_ROOT",
         "/share/dataset/x00840191/model_train/ckpt/"
-        "qwen3_1.7b_ar_cpt_baseline_0916/models"
+        "qwen3_1.7b_ar_cpt_baseline_0920/models"
     )
 )
 
@@ -176,11 +181,54 @@ root = Path(
 # checkpoint 范围
 # ------------------------------------------------------------------------------
 
-steps = list(range(500, 10501, 500))
+steps_arg = env.get("STEPS", "").strip()
 
-# 调试阶段如果只想跑 step=500，可临时改成：
-#
-# steps = [500]
+if steps_arg:
+    try:
+        steps = sorted(
+            {
+                int(value)
+                for value in steps_arg.replace(",", " ").split()
+            }
+        )
+    except ValueError as e:
+        raise SystemExit(
+            "STEPS must contain integers separated by commas or spaces; "
+            f"got {steps_arg!r}"
+        ) from e
+
+    if not steps or any(step <= 0 for step in steps):
+        raise SystemExit(
+            f"STEPS must contain positive integers; got {steps_arg!r}"
+        )
+
+    steps_source = "STEPS override"
+
+else:
+    steps = []
+
+    if root.is_dir():
+        for model_dir in root.glob("global_step_*"):
+            suffix = model_dir.name.removeprefix("global_step_")
+
+            # save_model_weights() writes config.json after all weight shards,
+            # so its presence is used as the completed-export marker.
+            if (
+                model_dir.is_dir()
+                and suffix.isdigit()
+                and (model_dir / "config.json").is_file()
+            ):
+                steps.append(int(suffix))
+
+    steps = sorted(set(steps))
+    steps_source = "auto-discovered"
+
+if not steps:
+    raise SystemExit(
+        "No completed HF checkpoints found.\n"
+        f"Model root: {root}\n"
+        "Wait for the next save step, set MODEL_ROOT, or provide STEPS."
+    )
 
 
 # ------------------------------------------------------------------------------
@@ -220,7 +268,7 @@ metric_flexible = "exact_match,flexible-extract"
 output = Path(
     env.get(
         "OUTPUT_ROOT",
-        "./eval_results_gsm8k_baseline_0916"
+        "./eval_results_gsm8k_baseline_0920"
     )
 ).resolve()
 
@@ -231,6 +279,7 @@ print("[config]")
 print(f"model root     : {root}")
 print(f"steps          : {steps[0]} ~ {steps[-1]}")
 print(f"num checkpoints: {len(steps)}")
+print(f"steps source   : {steps_source}")
 print(f"NPU devices    : {devices}")
 print(f"num processes  : {num_processes}")
 print(f"output         : {output}")
@@ -705,7 +754,7 @@ try:
             if result.returncode != 0:
 
                 raise RuntimeError(
-                    f"0916 baseline "
+                    f"{run_name} baseline "
                     f"step={step} "
                     f"failed with exit code "
                     f"{result.returncode}"
@@ -793,7 +842,7 @@ try:
 
             row = dict(
 
-                run="0916",
+                run=run_name,
 
                 step=step,
 
@@ -946,7 +995,7 @@ if rows:
 
     ax.set_title(
         "GSM8K 5-shot Accuracy Curve "
-        "(Qwen3-1.7B AR CPT Baseline 0916)",
+        f"(Qwen3-1.7B AR CPT Baseline {run_name})",
         fontsize=14,
     )
 
@@ -963,15 +1012,17 @@ if rows:
     )
 
 
-    # 不把 21 个刻度全部塞进去
+    # checkpoint 较多时不把所有刻度全部塞进去
+    available_tick_steps = sorted(set(x_steps))
+
     tick_steps = [
 
-        s for s in steps
+        s for s in available_tick_steps
 
         if (
             s % 2500 == 0
-            or s == steps[0]
-            or s == steps[-1]
+            or s == available_tick_steps[0]
+            or s == available_tick_steps[-1]
         )
     ]
 
