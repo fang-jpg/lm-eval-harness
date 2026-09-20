@@ -32,7 +32,7 @@ export HCCL_TIMEOUT=3600
 #   MASTER_PORT=29502 \
 #   MODEL_PATH=/path/to/weights bash hf_zss.sh
 # 
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 # ---------------------------------------------------------------------------
 #export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-12,13,14,15}"
 #export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-14,15}"
@@ -80,7 +80,7 @@ ACCELERATE_PORT_ARGS=(--main_process_port "${MASTER_PORT}")
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/0709_top64_SFT_sci_if_math_code_1550_OPD_OpenMath_100_mmlu_200_HF}"
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/global_step_400}"
 
-MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/global_step_102500/}"
+MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_500}"
 # MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/Qwen3-1.7B-Base/}"
 
 # ---------------------------------------------------------------------------
@@ -103,15 +103,15 @@ MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/global_step_102500/}"
 # ==============================================
 # 第二组：MMLU 评测 (5-shot)
 # ==============================================
-accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
-   -m lm_eval --model hf \
-   --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
-   --tasks mmlu \
-   --num_fewshot 5 \
-   --batch_size 1 \
-   --verbosity DEBUG \
-   --log_samples \
-   --output_path ./eval_results/mmlu
+# accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
+#    -m lm_eval --model hf \
+#    --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
+#    --tasks mmlu \
+#    --num_fewshot 5 \
+#    --batch_size 1 \
+#    --verbosity DEBUG \
+#    --log_samples \
+#    --output_path ./eval_results/mmlu
 
 # ==============================================
 # 第▒~@▒~D▒~ZGSM8K ▒~D▒~K (0-shot▒~L▒~O~B▒~@~C hf_nlc.sh)
@@ -124,45 +124,45 @@ accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_A
    --batch_size 1 \
    --verbosity DEBUG \
    --log_samples \
-   --output_path ./eval_results/gsm8k
+   --output_path ./eval_results_baseline/gsm8k
 
 
 # ==============================================
 # 第三组：HumanEval 评测 (0-shot，需执行生成代码)
 # ==============================================
-accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
-   -m lm_eval --model hf \
-   --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
-   --tasks humaneval \
-   --batch_size 1 \
-   --verbosity DEBUG \
-   --log_samples \
-   --output_path ./eval_results/humaneval \
-   --confirm_run_unsafe_code
+# accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
+#    -m lm_eval --model hf \
+#    --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
+#    --tasks humaneval \
+#    --batch_size 1 \
+#    --verbosity DEBUG \
+#    --log_samples \
+#    --output_path ./eval_results/humaneval \
+#    --confirm_run_unsafe_code
 
 # ==============================================
 # 第四组：BoolQ 评测 (5-shot)
 # ==============================================
-accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
-   -m lm_eval --model hf \
-   --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
-   --tasks boolq \
-   --num_fewshot 5 \
-   --batch_size 1 \
-   --verbosity DEBUG \
-   --log_samples \
-   --output_path ./eval_results/boolq
+# accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
+#    -m lm_eval --model hf \
+#    --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
+#    --tasks boolq \
+#    --num_fewshot 5 \
+#    --batch_size 1 \
+#    --verbosity DEBUG \
+#    --log_samples \
+#    --output_path ./eval_results/boolq
 
 # # ==============================================
 # # 第五组：BBH 评测 (3-shot)
 # # ==============================================
-accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
-    -m lm_eval --model hf \
-    --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
-    --tasks bbh \
-    --num_fewshot 3 \
-    --batch_size 1 \
-    --verbosity DEBUG \
-    --log_samples \
-    --output_path ./eval_results/bbh
+# accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
+#     -m lm_eval --model hf \
+#     --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
+#     --tasks bbh \
+#     --num_fewshot 3 \
+#     --batch_size 1 \
+#     --verbosity DEBUG \
+#     --log_samples \
+#     --output_path ./eval_results/bbh
 

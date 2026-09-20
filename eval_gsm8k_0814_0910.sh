@@ -26,7 +26,7 @@ export TOKENIZERS_PARALLELISM=false
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-3600}"
 export HCCL_EXEC_TIMEOUT="${HCCL_EXEC_TIMEOUT:-3600}"
 export HCCL_TIMEOUT="${HCCL_TIMEOUT:-3600}"
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
@@ -49,9 +49,9 @@ dry_run = env.get('DRY_RUN', '0') == '1'
 roots = {
     run: Path(env.get(f'ROOT_{run}',
         f'/share/dataset/x00840191/model_train/ckpt/phase4_cpt_ar_duffision_{run}/models'))
-    for run in ('0814', '0910')
+    for run in ('0916',)
 }
-steps = list(range(500, 6001, 500))
+steps = list(range(500, 10501, 500))
 devices = [x.strip() for x in env['ASCEND_RT_VISIBLE_DEVICES'].split(',') if x.strip()]
 if not devices:
     raise SystemExit('ASCEND_RT_VISIBLE_DEVICES is empty')
@@ -59,7 +59,7 @@ device = env.get('MODEL_DEVICE', 'npu:0' if len(devices) == 1 else '')
 seed = env.get('SEED', '42')
 metric = 'exact_match,strict-match'
 flexible = 'exact_match,flexible-extract'
-output = Path(env.get('OUTPUT_ROOT', './eval_results_gsm8k_0814_0910')).resolve()
+output = Path(env.get('OUTPUT_ROOT', './eval_results_gsm8k_0916')).resolve()
 
 def command(run, step, mode, destination):
     model = roots[run] / f'global_step_{step}'
@@ -145,9 +145,12 @@ try:
                     if result.returncode:
                         raise RuntimeError(f'{run} step={step} {mode} failed: exit {result.returncode}')
                     files = list(dest.rglob('results*.json'))
-                    if len(files) != 1:
-                        raise RuntimeError(f'Expected one aggregate result, found {len(files)}')
-                    data = json.loads(files[0].read_text(encoding='utf-8'))
+                    if not files:
+                        raise RuntimeError(f'No results.json found in {dest}')
+                    # 不管生成了几个，直接取最新修改的那一个
+                    files.sort(key=lambda f: f.stat().st_mtime)
+                    data = json.loads(files[-1].read_text(encoding='utf-8'))
+                    
                     scores = data['results']['gsm8k']
                     for key in (metric, flexible):
                         value = scores[key]
@@ -166,7 +169,7 @@ except KeyboardInterrupt:
     raise SystemExit(f'Interrupted. Completed final metrics are in {output}')
 
 fig, ax = plt.subplots(figsize=(11, 6))
-for run, color in (('0814', '#2563eb'), ('0910', '#ea580c')):
+for run, color in [('0916','#2563eb')]:
     for mode, style, marker in (('AR', '-', 'o'), ('Diffusion', '--', 's')):
         values = [r for r in rows if r['run'] == run and r['mode'] == mode]
         ax.plot([r['step'] for r in values], [r['strict_match'] * 100 for r in values],

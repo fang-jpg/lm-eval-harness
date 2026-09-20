@@ -1,0 +1,2 @@
+run,step,mode,strict_match,flexible_extract,strict_match_stderr,flexible_extract_stderr,checkpoint
+0916,500,AR,0.22062168309325247,0.2714177407126611,0.01142195779675019,0.012249002026150589,/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_500

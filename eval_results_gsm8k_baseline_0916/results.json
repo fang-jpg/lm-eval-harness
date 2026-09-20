@@ -1,0 +1,55 @@
+[
+  {
+    "run": "0916",
+    "step": 500,
+    "mode": "AR",
+    "strict_match": 0.22062168309325247,
+    "flexible_extract": 0.2714177407126611,
+    "strict_match_stderr": 0.01142195779675019,
+    "flexible_extract_stderr": 0.012249002026150589,
+    "checkpoint": "/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_500",
+    "metrics": {
+      "name": "gsm8k",
+      "alias": "gsm8k",
+      "sample_len": 1319,
+      "exact_match,strict-match": 0.22062168309325247,
+      "exact_match_stderr,strict-match": 0.01142195779675019,
+      "exact_match,flexible-extract": 0.2714177407126611,
+      "exact_match_stderr,flexible-extract": 0.012249002026150589
+    },
+    "n_samples": {
+      "gsm8k": {
+        "original": 1319,
+        "effective": 1319
+      }
+    },
+    "command": [
+      "/usr/local/python3.11.14/bin/python",
+      "-m",
+      "accelerate.commands.launch",
+      "--multi_gpu",
+      "--num_processes",
+      "8",
+      "--main_process_port",
+      "29503",
+      "-m",
+      "lm_eval",
+      "--model",
+      "hf",
+      "--model_args",
+      "pretrained=/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_500,tokenizer=/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_500,local_files_only=True,trust_remote_code=True,dtype=bfloat16",
+      "--tasks",
+      "gsm8k",
+      "--num_fewshot",
+      "5",
+      "--batch_size",
+      "1",
+      "--seed",
+      "42,42,42,42",
+      "--verbosity",
+      "WARNING",
+      "--output_path",
+      "<temporary-results>"
+    ]
+  }
+]
