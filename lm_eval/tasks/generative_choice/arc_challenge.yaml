@@ -1,0 +1,11 @@
+include: _choice_template_yaml
+task: arc_challenge_generative
+dataset_path: allenai/ai2_arc
+dataset_name: ARC-Challenge
+training_split: train
+fewshot_split: train
+validation_split: validation
+test_split: test
+process_docs: !function utils.process_arc
+should_decontaminate: true
+doc_to_decontamination_query: "{{query}}"

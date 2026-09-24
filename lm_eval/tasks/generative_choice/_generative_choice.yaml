@@ -1,0 +1,14 @@
+group: generative_choice
+group_alias: Generative choice suite
+task:
+  - arc_challenge_generative
+  - hellaswag_generative
+  - piqa_generative
+  - winogrande_generative
+aggregate_metric_list:
+  - metric: exact_match
+    aggregation: mean
+    weight_by_size: true
+    filter_list: get_response
+metadata:
+  version: 1.0

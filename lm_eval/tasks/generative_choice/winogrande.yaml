@@ -1,0 +1,10 @@
+include: _choice_template_yaml
+task: winogrande_generative
+dataset_path: allenai/winogrande
+dataset_name: winogrande_xl
+training_split: train
+fewshot_split: train
+validation_split: validation
+process_docs: !function utils.process_winogrande
+should_decontaminate: true
+doc_to_decontamination_query: "{{query}}"

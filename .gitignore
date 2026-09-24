@@ -78,3 +78,6 @@ htmlcov/
 # Agent tooling
 .claude/settings.local.json
 eval_results_diffusion/
+eval_results_ar_baseline/
+eval_results_cpt_diffusion_ar/
+eval_results_generation_comparison/

@@ -1,0 +1,9 @@
+include: _choice_template_yaml
+task: piqa_generative
+dataset_path: baber/piqa
+training_split: train
+fewshot_split: train
+validation_split: validation
+process_docs: !function utils.process_piqa
+should_decontaminate: true
+doc_to_decontamination_query: "{{query}}"

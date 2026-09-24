@@ -197,6 +197,107 @@ class BoolQAnswerRegexFilter(Filter):
         return [[extract(resp) for resp in response_set] for response_set in resps]
 
 
+@register_filter("choice-answer-regex")
+class ChoiceAnswerRegexFilter(Filter):
+    """Extract a generated multiple-choice answer letter.
+
+    The filter is intentionally shared by the AR and diffusion generative
+    tasks.  It accepts direct answers (``B``), labelled answers
+    (``Answer: B``), and short explanatory answers ending in a letter.  When
+    the processed document exposes a ``choices`` list, letters outside that
+    document's actual choice count are rejected.
+    """
+
+    _labeled_patterns = (
+        re.compile(
+            r"(?i)\b(?:the\s+)?(?:final\s+|best\s+)?answer"
+            r"(?:\s+is)?\s*[:：]?\s*[\(（\[]?([A-Z])(?![A-Z])[\)）\]]?"
+        ),
+        re.compile(
+            r"(?i)\b(?:the\s+)?(?:best\s+)?(?:choice|option)"
+            r"(?:\s+is)?\s*[:：]?\s*[\(（\[]?([A-Z])(?![A-Z])[\)）\]]?"
+        ),
+        re.compile(
+            r"(?i)\b(?:choose|select)(?:d)?\s*[:：]?\s*"
+            r"[\(（\[]?([A-Z])(?![A-Z])[\)）\]]?"
+        ),
+    )
+    _direct_pattern = re.compile(r"(?i)^\s*[\(（\[]?([A-Z])[\)）\]]?\s*[.。]?\s*$")
+    _terminal_pattern = re.compile(
+        r"(?i)(?<![A-Z])[\(（\[]?([A-Z])(?![A-Z])[\)）\]]?\s*[.。]?\s*$"
+    )
+
+    def __init__(
+        self,
+        valid_choices: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        fallback: str = "[invalid]",
+    ) -> None:
+        normalized = "".join(dict.fromkeys(valid_choices.upper()))
+        if not normalized or any(not ("A" <= letter <= "Z") for letter in normalized):
+            raise ValueError("valid_choices must contain one or more letters A-Z.")
+        self.valid_choices = normalized
+        self.fallback = fallback
+
+    @staticmethod
+    def _current_answer_segment(response: str) -> str:
+        """Drop a hallucinated next item without discarding short reasoning."""
+        text = response.strip()
+        for separator in (
+            "\n\nQuestion:",
+            "\nQuestion:",
+            "\n\nContext:",
+            "\nContext:",
+        ):
+            text = text.split(separator, 1)[0]
+        return text.strip()
+
+    def _valid_for_doc(self, doc: dict[str, Any] | None) -> str:
+        if not doc:
+            return self.valid_choices
+        choices = doc.get("choices")
+        if isinstance(choices, (list, tuple)) and choices:
+            return self.valid_choices[: len(choices)]
+        return self.valid_choices
+
+    def _extract(self, response: str, valid_choices: str) -> str:
+        if not isinstance(response, str):
+            return self.fallback
+        text = self._current_answer_segment(response)
+        if not text:
+            return self.fallback
+
+        for pattern in self._labeled_patterns:
+            matches = [
+                match.group(1).upper()
+                for match in pattern.finditer(text)
+                if match.group(1).upper() in valid_choices
+            ]
+            if matches:
+                return matches[-1]
+
+        direct = self._direct_pattern.fullmatch(text)
+        if direct and direct.group(1).upper() in valid_choices:
+            return direct.group(1).upper()
+
+        terminal = self._terminal_pattern.search(text)
+        if terminal and terminal.group(1).upper() in valid_choices:
+            return terminal.group(1).upper()
+        return self.fallback
+
+    def apply(
+        self, resps: Iterable[Sequence[str]], docs: Sequence[dict[str, Any]]
+    ) -> list[list[str]]:
+        documents = list(docs)
+        filtered = []
+        for index, response_set in enumerate(resps):
+            doc = documents[index] if index < len(documents) else None
+            valid_choices = self._valid_for_doc(doc)
+            filtered.append(
+                [self._extract(response, valid_choices) for response in response_set]
+            )
+        return filtered
+
+
 @register_filter("multi_choice_regex")
 class MultiChoiceRegexFilter(RegexFilter):
     """Extract a model's answer on multiple choice questions with letter answers.
