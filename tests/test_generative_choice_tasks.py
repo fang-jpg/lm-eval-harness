@@ -118,3 +118,12 @@ def test_comparison_runner_uses_one_baseline_mode_and_two_trained_modes():
     assert contents.count('MODEL_PATH="${TRAINED_MODEL_PATH}"') == 2
     assert contents.count("EVAL_MODE=ar") == 2
     assert contents.count("EVAL_MODE=diffusion") == 1
+
+
+def test_shared_runner_discovers_cann_without_a_server_specific_default():
+    contents = (REPO_ROOT / "hf_generation_suite.sh").read_text(encoding="utf-8")
+
+    assert 'CANN_ENV="${CANN_ENV:-}"' in contents
+    assert 'CANN_ROOT="${CANN_ROOT:-}"' in contents
+    assert "can_load_ascend_backend" in contents
+    assert "/share/f50058111/activate_cann_910b_9.1.sh" not in contents

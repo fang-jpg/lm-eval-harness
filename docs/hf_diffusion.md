@@ -109,6 +109,37 @@ The shared runner supports these environment overrides:
 - `ENABLE_UNSAFE_CODE=1`: explicit opt-in required when `TASKS` contains
   `humaneval`.
 
+### CANN environment discovery
+
+The shared runner does not require a server-specific CANN path. It resolves the
+environment in this order:
+
+1. Reuse the current environment when `libhccl.so` is already loadable.
+2. Source the explicit `CANN_ENV` script, when provided.
+3. Search below `CANN_ROOT`, `ASCEND_HOME_PATH`, and `ASCEND_TOOLKIT_HOME`.
+4. Search common `/usr/local/Ascend`, `/opt/ascend`, `/home/*`, and `/share/*`
+   CANN layouts.
+
+For a one-off run on a server with a nonstandard installation, use a path that
+is visible inside the container:
+
+```bash
+CANN_ROOT=/home/f50058111/Ascend910B_CANN_9.1.0 \
+bash hf_compare_generation_xyf2.sh
+```
+
+or point directly at the official environment script:
+
+```bash
+CANN_ENV=/home/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0/set_env.sh \
+bash hf_compare_generation_xyf2.sh
+```
+
+If the host directory is not visible after `docker exec`, the container must be
+recreated with a bind mount. Prefer a stable container path such as
+`/opt/ascend/cann`, then set `CANN_ROOT=/opt/ascend/cann` independently of the
+host installation path.
+
 `--batch_size 1` is intentional for generation: prompts in a batch have
 different lengths, while block-diffusion KV-cache generation is performed one
 unpadded prompt at a time. Multi-NPU execution still provides data parallelism
