@@ -80,7 +80,7 @@ ACCELERATE_PORT_ARGS=(--main_process_port "${MASTER_PORT}")
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/0709_top64_SFT_sci_if_math_code_1550_OPD_OpenMath_100_mmlu_200_HF}"
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/global_step_400}"
 
-MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_500}"
+MODEL_PATH="${MODEL_PATH:-/data2/model_train/ckpt/phase4_cpt_ar_diffusion_0916/models/global_step_10500}"
 # MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/Qwen3-1.7B-Base/}"
 
 # ---------------------------------------------------------------------------

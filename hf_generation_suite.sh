@@ -15,28 +15,123 @@ esac
 
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_CANN="${SKIP_CANN:-0}"
-CANN_ENV="${CANN_ENV:-/share/f50058111/activate_cann_910b_9.1.sh}"
+CANN_ENV="${CANN_ENV:-}"
+CANN_ROOT="${CANN_ROOT:-}"
 
-if [[ "${DRY_RUN}" != "1" && "${SKIP_CANN}" != "1" ]]; then
-  if [[ -f "${CANN_ENV}" ]]; then
-    set +e
-    set +u
-    export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
-    # shellcheck disable=SC1090
-    source "${CANN_ENV}"
-    cann_status=$?
-    set -e
-    set -u
-    if (( cann_status != 0 )); then
-      echo "[warning] CANN environment script exited with status ${cann_status}." >&2
-    fi
-  else
-    echo "[warning] CANN environment script not found: ${CANN_ENV}" >&2
-    echo "[warning] Continuing with the current environment." >&2
+can_load_ascend_backend() {
+  python - <<'PY' >/dev/null 2>&1
+import ctypes
+
+ctypes.CDLL("libhccl.so")
+import torch_npu  # noqa: F401
+PY
+}
+
+source_cann_env() {
+  local env_script="$1"
+  local source_status
+
+  echo "[CANN] Sourcing ${env_script}"
+  set +e
+  set +u
+  export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+  # shellcheck disable=SC1090
+  source "${env_script}"
+  source_status=$?
+  set -e
+  set -u
+  return "${source_status}"
+}
+
+add_cann_root_candidates() {
+  local root="$1"
+  local candidate
+
+  [[ -z "${root}" ]] && return
+  CANN_ENV_CANDIDATES+=(
+    "${root}/set_env.sh"
+    "${root}/ascend-toolkit/set_env.sh"
+    "${root}/latest/set_env.sh"
+  )
+  shopt -s nullglob
+  for candidate in \
+    "${root}"/cann-*/set_env.sh \
+    "${root}"/cann-*/ascend-toolkit/set_env.sh \
+    "${root}"/ascend-toolkit/*/set_env.sh; do
+    CANN_ENV_CANDIDATES+=("${candidate}")
+  done
+  shopt -u nullglob
+}
+
+configure_cann() {
+  local candidate
+  local -A seen_candidates=()
+  CANN_ENV_CANDIDATES=()
+
+  if can_load_ascend_backend; then
+    echo "[CANN] Reusing the environment already available in this container."
+    return
   fi
+
+  if [[ -n "${CANN_ENV}" ]]; then
+    if [[ ! -f "${CANN_ENV}" ]]; then
+      echo "[CANN] CANN_ENV does not exist inside the container: ${CANN_ENV}" >&2
+      return 1
+    fi
+    if ! source_cann_env "${CANN_ENV}" || ! can_load_ascend_backend; then
+      echo "[CANN] ${CANN_ENV} did not make torch_npu and libhccl.so loadable." >&2
+      return 1
+    fi
+    return
+  fi
+
+  add_cann_root_candidates "${CANN_ROOT}"
+  add_cann_root_candidates "${ASCEND_HOME_PATH:-}"
+  add_cann_root_candidates "${ASCEND_TOOLKIT_HOME:-}"
+  add_cann_root_candidates "/usr/local/Ascend/cann"
+  add_cann_root_candidates "/usr/local/Ascend/ascend-toolkit"
+  add_cann_root_candidates "/opt/ascend/cann"
+
+  shopt -s nullglob
+  CANN_ENV_CANDIDATES+=(
+    /home/*/Ascend*CANN*/set_env.sh
+    /home/*/Ascend*CANN*/cann-*/set_env.sh
+    /home/*/Ascend*CANN*/cann-*/ascend-toolkit/set_env.sh
+    /share/*/Ascend*CANN*/set_env.sh
+    /share/*/Ascend*CANN*/cann-*/set_env.sh
+    /share/*/Ascend*CANN*/cann-*/ascend-toolkit/set_env.sh
+    /home/*/activate_cann*.sh
+    /share/*/activate_cann*.sh
+  )
+  shopt -u nullglob
+
+  for candidate in "${CANN_ENV_CANDIDATES[@]}"; do
+    [[ -f "${candidate}" ]] || continue
+    [[ -n "${seen_candidates[${candidate}]:-}" ]] && continue
+    seen_candidates["${candidate}"]=1
+    if source_cann_env "${candidate}" && can_load_ascend_backend; then
+      echo "[CANN] torch_npu and libhccl.so are available after sourcing ${candidate}."
+      return
+    fi
+  done
+
+  cat >&2 <<'EOF'
+[CANN] Unable to load libhccl.so inside the container.
+[CANN] Either mount the CANN installation into the container, or set one of:
+[CANN]   CANN_ENV=/path/to/set_env.sh
+[CANN]   CANN_ROOT=/path/to/cann-installation
+[CANN] Paths must be paths visible inside the container, not host-only paths.
+EOF
+  return 1
+}
+source /usr/local/Ascend/cann-8.5.2/set_env.sh
+if [[ "${DRY_RUN}" != "1" && "${SKIP_CANN}" != "1" ]]; then
+  configure_cann
+  echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
+  echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
 fi
 
-export HF_HOME="${HF_HOME:-/share/f50058111/huggingface_cache}"
+export HF_HOME="${HF_HOME:-/home/f50058111/huggingface_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"

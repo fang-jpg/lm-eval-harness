@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-BASELINE_MODEL_PATH="${BASELINE_MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0916/models/global_step_500}"
-TRAINED_MODEL_PATH="${TRAINED_MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/phase4_cpt_ar_duffision_0910/models/global_step_102500}"
+BASELINE_MODEL_PATH="${BASELINE_MODEL_PATH:-/data2/model_train/ckpt/qwen3_1.7b_baseline/models/global_step_10500}"
+TRAINED_MODEL_PATH="${TRAINED_MODEL_PATH:-/data2/model_train/ckpt/phase4_cpt_ar_diffusion_0916/models/global_step_10500}"
 COMPARISON_OUTPUT_ROOT="${COMPARISON_OUTPUT_ROOT:-./eval_results_generation_comparison}"
 TASKS="${TASKS:-mmlu,gsm8k,boolq,bbh,arc_challenge,hellaswag,piqa,winogrande}"
 
