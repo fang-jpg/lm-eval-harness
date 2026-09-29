@@ -1,6 +1,6 @@
 include: _choice_template_yaml
 task: winogrande_generative
-dataset_path: allenai/winogrande
+dataset_path: allenai/winogrande//winogrande
 dataset_name: winogrande_xl
 training_split: train
 fewshot_split: train

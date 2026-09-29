@@ -1,6 +1,6 @@
 include: _choice_template_yaml
 task: arc_challenge_generative
-dataset_path: allenai/ai2_arc
+dataset_path: allenai/ai2_arc/ai2_arc
 dataset_name: ARC-Challenge
 training_split: train
 fewshot_split: train

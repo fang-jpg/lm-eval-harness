@@ -124,7 +124,6 @@ configure_cann() {
 EOF
   return 1
 }
-source /usr/local/Ascend/cann-8.5.2/set_env.sh
 if [[ "${DRY_RUN}" != "1" && "${SKIP_CANN}" != "1" ]]; then
   configure_cann
   echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"

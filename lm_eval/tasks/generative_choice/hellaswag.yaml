@@ -1,6 +1,6 @@
 include: _choice_template_yaml
 task: hellaswag_generative
-dataset_path: Rowan/hellaswag
+dataset_path: Rowan/hellaswag/hellaswag
 training_split: train
 fewshot_split: train
 validation_split: validation
