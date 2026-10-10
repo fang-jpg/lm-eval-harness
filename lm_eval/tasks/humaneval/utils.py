@@ -2,7 +2,17 @@ import evaluate as hf_evaluate
 
 
 try:
-    compute_ = hf_evaluate.load("code_eval")
+    # compute_ = hf_evaluate.load("code_eval")
+    import os
+    import uuid
+
+    compute_ = hf_evaluate.load(
+        "code_eval",
+        experiment_id=(
+            f"humaneval_rank{os.environ.get('RANK', '0')}"
+            f"_pid{os.getpid()}_{uuid.uuid4().hex}"
+        ),
+    )
     test_cases = ["assert add(2, 3)==5"]
     candidates = [["def add(a,b): return a*b"]]
     results = compute_.compute(references=test_cases, predictions=candidates, k=[1])

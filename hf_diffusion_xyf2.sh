@@ -104,8 +104,26 @@ run_task() {
   local fewshot="$2"
   shift 2
 
-  echo "==== hf-diffusion task=${task}, fewshot=${fewshot}, model=${MODEL_PATH} ===="
-  accelerate launch "${ACCELERATE_ARGS[@]}" \
+  local log_dir="${RUN_OUTPUT}/logs"
+  mkdir -p "${log_dir}"
+
+  local timestamp
+  timestamp="$(date +%Y%m%d_%H%M%S)"
+
+  local log_file="${log_dir}/${task}_${timestamp}.log"
+
+  echo "===================================================="
+  echo "Task       : ${task}"
+  echo "Model      : ${MODEL_PATH}"
+  echo "Fewshot    : ${fewshot}"
+  echo "Log file   : ${log_file}"
+  echo "Start time : $(date '+%F %T')"
+  echo "===================================================="
+
+  # 同时保存 stdout/stderr，且保留原始退出码
+  local exit_code
+
+  if accelerate launch "${ACCELERATE_ARGS[@]}" \
     -m lm_eval \
     --model hf-diffusion \
     --model_args "${MODEL_ARGS}" \
@@ -116,7 +134,17 @@ run_task() {
     --log_samples \
     --output_path "${RUN_OUTPUT}/${task}" \
     "${LIMIT_ARGS[@]}" \
-    "$@"
+    "$@" \
+    2>&1 | tee -a "${log_file}"; then
+
+    echo "[SUCCESS] ${task} completed at $(date '+%F %T')" \
+      | tee -a "${log_file}"
+  else
+    exit_code="${PIPESTATUS[0]}"
+    echo "[ERROR] ${task} failed, exit code=${exit_code}" \
+      | tee -a "${log_file}"
+    return "${exit_code}"
+  fi
 }
 
 # MMLU and BoolQ must exercise the same block_diff generation path as the
@@ -125,9 +153,12 @@ run_task() {
 # task_selected mmlu && run_task mmlu_generative 5
 
 # All five tasks now call block-diffusion generate_until.
-task_selected gsm8k && run_task gsm8k 5
+# task_selected gsm8k && run_task gsm8k 5
 # task_selected humaneval && run_task humaneval 0 --confirm_run_unsafe_code
 # task_selected boolq && run_task boolq-seq2seq 5
-# task_selected bbh && run_task bbh 3
+task_selected bbh && run_task bbh 3
+
+task_selected mmlu && run_task mmlu_generative 5
+task_selected boolq && run_task boolq-seq2seq 5
 
 echo "Diffusion evaluation finished. Results: ${RUN_OUTPUT}"
