@@ -62,11 +62,23 @@ SEED="${SEED:-42}"
 LIMIT="${LIMIT:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_diffusion}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
+# Every completed model response is committed to a rank-local SQLite file.
+# If the long-running inference succeeds but the final HCCL gather fails, the
+# next attempt reads these files and only recomputes genuinely missing samples.
+RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
+# Total attempts, including the first one.  Two is normally enough: the first
+# attempt fills the cache and a fresh distributed process performs aggregation.
+MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-2}"
 
 NUM_DEVICES="$(awk -F',' '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
 RUN_NAME="$(basename "${MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 mkdir -p "${RUN_OUTPUT}"
+
+if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAX_TASK_ATTEMPTS must be a positive integer, got: ${MAX_TASK_ATTEMPTS}" >&2
+  exit 2
+fi
 
 MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},threshold=${THRESHOLD},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
 if [[ -n "${DIFFUSION_STEPS}" ]]; then
@@ -84,6 +96,12 @@ fi
 if [[ -n "${MODEL_DEVICE}" ]]; then
   MODEL_ARGS+=",device=${MODEL_DEVICE}"
 fi
+
+# CachingLM's request key contains the prompt and generation kwargs, but not
+# the model identity or hf-diffusion-specific decoding settings.  Namespace
+# the cache with those arguments so changing a checkpoint/setting cannot reuse
+# stale responses accidentally.
+CACHE_CONFIG_ID="$(python -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${MODEL_ARGS}")"
 
 ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --main_process_port "${MASTER_PORT}")
 if (( NUM_DEVICES > 1 )); then
@@ -111,40 +129,62 @@ run_task() {
   timestamp="$(date +%Y%m%d_%H%M%S)"
 
   local log_file="${log_dir}/${task}_${timestamp}.log"
+  local cache_prefix="${RESPONSE_CACHE_ROOT}/${RUN_NAME}/${CACHE_CONFIG_ID}/${task}/responses"
+  mkdir -p "$(dirname "${cache_prefix}")"
 
   echo "===================================================="
   echo "Task       : ${task}"
   echo "Model      : ${MODEL_PATH}"
   echo "Fewshot    : ${fewshot}"
   echo "Log file   : ${log_file}"
+  echo "Cache ID   : ${CACHE_CONFIG_ID}"
+  echo "Cache files: ${cache_prefix}_rank<N>.db"
   echo "Start time : $(date '+%F %T')"
   echo "===================================================="
 
-  # 同时保存 stdout/stderr，且保留原始退出码
-  local exit_code
-
-  if accelerate launch "${ACCELERATE_ARGS[@]}" \
-    -m lm_eval \
-    --model hf-diffusion \
-    --model_args "${MODEL_ARGS}" \
-    --tasks "${task}" \
-    --num_fewshot "${fewshot}" \
-    --batch_size 1 \
-    --verbosity INFO \
-    --log_samples \
-    --output_path "${RUN_OUTPUT}/${task}" \
-    "${LIMIT_ARGS[@]}" \
-    "$@" \
-    2>&1 | tee -a "${log_file}"; then
-
-    echo "[SUCCESS] ${task} completed at $(date '+%F %T')" \
+  # Save stdout/stderr while preserving accelerate's exit status.  The
+  # response cache is rank-dependent, so retries must keep the same device
+  # count and ordering.  lm-eval adds the `_rank<N>.db` suffix itself.
+  local attempt
+  local exit_code=1
+  for ((attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++)); do
+    echo "[ATTEMPT ${attempt}/${MAX_TASK_ATTEMPTS}] ${task}" \
       | tee -a "${log_file}"
-  else
-    exit_code="${PIPESTATUS[0]}"
-    echo "[ERROR] ${task} failed, exit code=${exit_code}" \
-      | tee -a "${log_file}"
-    return "${exit_code}"
-  fi
+
+    if accelerate launch "${ACCELERATE_ARGS[@]}" \
+      -m lm_eval \
+      --model hf-diffusion \
+      --model_args "${MODEL_ARGS}" \
+      --tasks "${task}" \
+      --num_fewshot "${fewshot}" \
+      --batch_size 1 \
+      --verbosity INFO \
+      --log_samples \
+      --use_cache "${cache_prefix}" \
+      --cache_requests \
+      --output_path "${RUN_OUTPUT}/${task}" \
+      "${LIMIT_ARGS[@]}" \
+      "$@" \
+      2>&1 | tee -a "${log_file}"; then
+
+      echo "[SUCCESS] ${task} completed at $(date '+%F %T')" \
+        | tee -a "${log_file}"
+      return 0
+    else
+      exit_code="${PIPESTATUS[0]}"
+      echo "[ERROR] ${task} attempt ${attempt} failed, exit code=${exit_code}" \
+        | tee -a "${log_file}"
+      echo "[RECOVERY] Completed responses remain in ${cache_prefix}_rank<N>.db" \
+        | tee -a "${log_file}"
+    fi
+
+    if (( attempt < MAX_TASK_ATTEMPTS )); then
+      echo "[RETRY] Restarting all ranks; cached responses will skip inference." \
+        | tee -a "${log_file}"
+    fi
+  done
+
+  return "${exit_code}"
 }
 
 # MMLU and BoolQ must exercise the same block_diff generation path as the
