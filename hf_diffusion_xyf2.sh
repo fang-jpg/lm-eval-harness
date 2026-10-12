@@ -38,9 +38,13 @@ export HF_EVALUATE_OFFLINE=1
 
 export TOKENIZERS_PARALLELISM=false
 export HF_ALLOW_CODE_EVAL=1
-export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-3600}"
-export HCCL_EXEC_TIMEOUT="${HCCL_EXEC_TIMEOUT:-3600}"
-export HCCL_TIMEOUT="${HCCL_TIMEOUT:-3600}"
+# BBH diffusion requests have highly variable generation times across ranks.
+# Fast ranks may reach the final collective more than one hour before slow
+# ranks.  CANN 9.1 allows HCCL_CONNECT_TIMEOUT up to 7200 seconds, so use that
+# ceiling while retaining environment-variable overrides.
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-7200}"
+export HCCL_EXEC_TIMEOUT="${HCCL_EXEC_TIMEOUT:-7200}"
+export HCCL_TIMEOUT="${HCCL_TIMEOUT:-7200}"
 
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
@@ -66,9 +70,10 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 # If the long-running inference succeeds but the final HCCL gather fails, the
 # next attempt reads these files and only recomputes genuinely missing samples.
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
-# Total attempts, including the first one.  Two is normally enough: the first
-# attempt fills the cache and a fresh distributed process performs aggregation.
-MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-2}"
+# Total attempts, including the first one.  A retry only computes responses
+# still missing from each rank-local cache, so an extra attempt is inexpensive
+# and covers a slow rank that needs more than one timeout window to catch up.
+MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
 
 NUM_DEVICES="$(awk -F',' '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
 RUN_NAME="$(basename "${MODEL_PATH%/}")"
@@ -139,6 +144,7 @@ run_task() {
   echo "Log file   : ${log_file}"
   echo "Cache ID   : ${CACHE_CONFIG_ID}"
   echo "Cache files: ${cache_prefix}_rank<N>.db"
+  echo "HCCL wait  : connect=${HCCL_CONNECT_TIMEOUT}s, exec=${HCCL_EXEC_TIMEOUT}s"
   echo "Start time : $(date '+%F %T')"
   echo "===================================================="
 
