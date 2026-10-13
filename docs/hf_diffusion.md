@@ -31,10 +31,10 @@ is required for the per-layer attention-mask mapping used during denoising.
 
 ## Run the three-way comparison
 
-The existing `hf_xyf2.sh` and `hf_diffusion_xyf2.sh` launchers are unchanged.
 The extended generation suite uses the separate `hf_generation_suite.sh`
-runner. From the `lm-evaluation-harness` checkout, run only the AR baseline
-with:
+runner. The `hf_diffusion_xyf2.sh` launcher also supports confidence-threshold
+decoding and writes a combined accuracy/performance summary for each task.
+From the `lm-evaluation-harness` checkout, run only the AR baseline with:
 
 ```bash
 EVAL_MODE=ar \
@@ -91,9 +91,14 @@ The shared runner supports these environment overrides:
 - `DIFFUSION_STEPS`: total denoising steps per request. If unset, it equals
   that request's generation length. It must be at least the number of blocks.
 - `MASK_TOKEN_ID`: override `config.json` only when necessary.
-- `DIFFUSION_TEMPERATURE`, `THRESHOLD`, `TOP_K`, `TOP_P`: sampling controls.
-  A task's `do_sample: false` generation setting takes precedence and keeps the
-  suite deterministic.
+- `THRESHOLD`: confidence threshold for committing masked tokens. `0` preserves
+  scheduled quota decoding. Values in `(0, 1]` commit every token at or above
+  the threshold and leave the others masked for the next step. The final step
+  allocated to a block commits any remaining masks and reports them as forced
+  low-confidence tokens. `hf_diffusion_xyf2.sh` defaults this to `0.8`.
+- `DIFFUSION_TEMPERATURE`, `TOP_K`, `TOP_P`: sampling controls. A task's
+  `do_sample: false` generation setting takes precedence and keeps the suite
+  deterministic.
 - `MC_NUM` and `MC_BATCH_SIZE`: only affect custom likelihood tasks; they are
   not used by the generation suite.
 - `LIMIT`: harness sample limit for smoke tests.
@@ -108,6 +113,14 @@ The shared runner supports these environment overrides:
   development run.
 - `ENABLE_UNSAFE_CODE=1`: explicit opt-in required when `TASKS` contains
   `humaneval`.
+
+For every successfully completed task, `hf_diffusion_xyf2.sh` creates a
+`*_summary.log` beside the ordinary task log. It combines the lm-eval accuracy
+metrics with actual prefill, denoise, causal and scoring forward counts;
+decode-only tokens/second; aggregate block-step statistics; and one compact
+per-request list containing the actual step count for every generated block.
+Rank-local machine-readable JSON is retained below `METRICS_ROOT`, which
+defaults to `<run output>/metrics`.
 
 ### CANN environment discovery
 

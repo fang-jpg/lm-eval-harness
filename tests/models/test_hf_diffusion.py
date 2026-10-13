@@ -59,6 +59,44 @@ def test_allocate_steps_distributes_remainder_to_early_blocks():
         HFDiffusionLM._allocate_steps(2, 3)
 
 
+def test_threshold_accepts_only_confident_tokens_before_final_step():
+    lm = HFDiffusionLM.__new__(HFDiffusionLM)
+    lm.threshold = 0.8
+    confidence = torch.tensor([[0.91, 0.79, 0.80]])
+    mutable = torch.tensor([[True, True, True]])
+
+    updates, accepted_count, forced_count = lm._select_updates(
+        confidence,
+        mutable,
+        initial_count=3,
+        step_index=0,
+        num_steps=2,
+    )
+
+    assert updates.tolist() == [[True, False, True]]
+    assert accepted_count == 2
+    assert forced_count == 0
+
+
+def test_threshold_final_step_forces_remaining_low_confidence_tokens():
+    lm = HFDiffusionLM.__new__(HFDiffusionLM)
+    lm.threshold = 0.8
+    confidence = torch.tensor([[0.91, 0.79, 0.80]])
+    mutable = torch.tensor([[True, True, True]])
+
+    updates, accepted_count, forced_count = lm._select_updates(
+        confidence,
+        mutable,
+        initial_count=3,
+        step_index=1,
+        num_steps=2,
+    )
+
+    assert updates.tolist() == [[True, True, True]]
+    assert accepted_count == 3
+    assert forced_count == 1
+
+
 def test_single_token_choices_reuse_context_forward():
     model = _FakeMaskedLM(preferred_token=1)
     lm = _make_lm(model)
@@ -85,7 +123,7 @@ def test_uniform_mc_likelihood_equals_target_length_times_log_vocab():
     assert score == pytest.approx(-3 * math.log(vocab_size), rel=1e-6)
 
 
-def test_tiny_qwen3_runs_cached_block_diffusion_generation():
+def test_tiny_qwen3_records_threshold_generation_metrics():
     config = Qwen3Config(
         vocab_size=32,
         hidden_size=16,
@@ -106,15 +144,27 @@ def test_tiny_qwen3_runs_cached_block_diffusion_generation():
     lm.block_length = 2
     lm.diffusion_steps = 4
     lm.diffusion_temperature = 0.0
-    lm.threshold = 0.0
+    lm.threshold = 0.8
     lm.top_k = 0
     lm.top_p = 1.0
+    lm._metrics_dir = "enabled-for-test"
+    lm._perf_metrics = lm._new_perf_metrics()
 
     prompt = torch.tensor([[1, 4, 5]])
     output = lm._generate_one(prompt, max_new_tokens=4, temperature=0.0)
 
     assert output.shape == (1, 7)
     assert not output[:, prompt.shape[1] :].eq(lm.mask_token_id).any()
+    assert lm._perf_metrics["forward_counts"] == {
+        "prefill": 1,
+        "denoise": 4,
+        "causal": 2,
+        "scoring": 0,
+    }
+    assert lm._perf_metrics["requests"][0]["block_steps"] == [2, 2]
+    assert lm._perf_metrics["requests"][0][
+        "block_forced_low_confidence_tokens"
+    ] == [1, 1]
 
 
 def test_constructor_forces_eager_attention_on_loaded_checkpoint(tmp_path):

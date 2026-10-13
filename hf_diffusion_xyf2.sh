@@ -13,6 +13,8 @@ source /share/f50058111/activate_cann_910b_9.1.sh
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "===== CANN environment loaded ====="
 echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
 echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
@@ -57,7 +59,10 @@ BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-}"
 DIFFUSION_TEMPERATURE="${DIFFUSION_TEMPERATURE:-0.0}"
-THRESHOLD="${THRESHOLD:-0.0}"
+# THRESHOLD=0 keeps scheduled quota decoding. A value in (0, 1] enables
+# confidence-threshold decoding; the final allocated step commits any masks
+# still below the threshold and records them as forced low-confidence tokens.
+THRESHOLD="${THRESHOLD:-0.8}"
 TOP_K="${TOP_K:-0}"
 TOP_P="${TOP_P:-1.0}"
 MC_NUM="${MC_NUM:-128}"
@@ -78,6 +83,7 @@ MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
 NUM_DEVICES="$(awk -F',' '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
 RUN_NAME="$(basename "${MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
+METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
 mkdir -p "${RUN_OUTPUT}"
 
 if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -134,14 +140,22 @@ run_task() {
   timestamp="$(date +%Y%m%d_%H%M%S)"
 
   local log_file="${log_dir}/${task}_${timestamp}.log"
+  local summary_log="${log_dir}/${task}_${timestamp}_summary.log"
+  local metrics_run_dir="${METRICS_ROOT}/${task}_${timestamp}"
   local cache_prefix="${RESPONSE_CACHE_ROOT}/${RUN_NAME}/${CACHE_CONFIG_ID}/${task}/responses"
   mkdir -p "$(dirname "${cache_prefix}")"
+  mkdir -p "${metrics_run_dir}"
 
   echo "===================================================="
   echo "Task       : ${task}"
   echo "Model      : ${MODEL_PATH}"
   echo "Fewshot    : ${fewshot}"
+  echo "Block size : ${BLOCK_LENGTH}"
+  echo "Diff steps : ${DIFFUSION_STEPS:-auto}"
+  echo "Threshold  : ${THRESHOLD}"
   echo "Log file   : ${log_file}"
+  echo "Summary log: ${summary_log}"
+  echo "Metrics dir: ${metrics_run_dir}"
   echo "Cache ID   : ${CACHE_CONFIG_ID}"
   echo "Cache files: ${cache_prefix}_rank<N>.db"
   echo "HCCL wait  : connect=${HCCL_CONNECT_TIMEOUT}s, exec=${HCCL_EXEC_TIMEOUT}s"
@@ -154,10 +168,13 @@ run_task() {
   local attempt
   local exit_code=1
   for ((attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++)); do
+    local attempt_metrics_dir="${metrics_run_dir}/attempt_${attempt}"
+    mkdir -p "${attempt_metrics_dir}"
     echo "[ATTEMPT ${attempt}/${MAX_TASK_ATTEMPTS}] ${task}" \
       | tee -a "${log_file}"
 
-    if accelerate launch "${ACCELERATE_ARGS[@]}" \
+    if HF_DIFFUSION_METRICS_DIR="${attempt_metrics_dir}" \
+      accelerate launch "${ACCELERATE_ARGS[@]}" \
       -m lm_eval \
       --model hf-diffusion \
       --model_args "${MODEL_ARGS}" \
@@ -175,6 +192,20 @@ run_task() {
 
       echo "[SUCCESS] ${task} completed at $(date '+%F %T')" \
         | tee -a "${log_file}"
+      if python "${SCRIPT_DIR}/scripts/summarize_diffusion_metrics.py" \
+        --metrics-dir "${metrics_run_dir}" \
+        --results-dir "${RUN_OUTPUT}/${task}" \
+        --output "${summary_log}" \
+        --task "${task}" \
+        --model "${MODEL_PATH}" \
+        --source-log "${log_file}"; then
+        echo "[SUMMARY] Accuracy and diffusion performance: ${summary_log}" \
+          | tee -a "${log_file}"
+      else
+        echo "[ERROR] Failed to create diffusion summary log." \
+          | tee -a "${log_file}"
+        return 1
+      fi
       return 0
     else
       exit_code="${PIPESTATUS[0]}"

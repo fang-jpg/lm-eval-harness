@@ -9,10 +9,15 @@ model in MindSpeed-LLM).
 
 from __future__ import annotations
 
+import atexit
 import copy
+import json
 import logging
 import math
+import os
+import time
 from collections import defaultdict
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -82,6 +87,8 @@ class HFDiffusionLM(HFLM):
         self.check_greedy = bool(check_greedy)
         self.seed = int(seed)
         self._generation_calls = 0
+        self._perf_metrics = self._new_perf_metrics()
+        self._metrics_dir = os.environ.get("HF_DIFFUSION_METRICS_DIR")
 
         self._validate_diffusion_args()
         # HFLM loads its inspection config and model config separately.  This
@@ -116,12 +123,16 @@ class HFDiffusionLM(HFLM):
         self.mask_token_id = int(self.mask_token_id)
         self._validate_mask_token()
 
+        if self._metrics_dir:
+            atexit.register(self._write_perf_metrics)
+
         eval_logger.info(
             "Initialized hf-diffusion: mask_token_id=%d, block_length=%d, "
-            "diffusion_steps=%s, mc_num=%d",
+            "diffusion_steps=%s, threshold=%.4f, mc_num=%d",
             self.mask_token_id,
             self.block_length,
             self.diffusion_steps,
+            self.threshold,
             self.mc_num,
         )
 
@@ -140,8 +151,8 @@ class HFDiffusionLM(HFLM):
             raise ValueError("diffusion_steps must be positive when provided.")
         if self.diffusion_temperature < 0:
             raise ValueError("diffusion_temperature must be non-negative.")
-        if self.threshold < 0:
-            raise ValueError("threshold must be non-negative.")
+        if not 0 <= self.threshold <= 1:
+            raise ValueError("threshold must be in [0, 1].")
         if self.top_k < 0:
             raise ValueError("top_k must be non-negative.")
         if not 0 < self.top_p <= 1:
@@ -182,8 +193,106 @@ class HFDiffusionLM(HFLM):
             enabled=self.mixed_precision_dtype is not None,
         )
 
+    def _new_perf_metrics(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "forward_counts": {
+                "prefill": 0,
+                "denoise": 0,
+                "causal": 0,
+                "scoring": 0,
+            },
+            "generation_requests": 0,
+            "raw_generated_tokens": 0,
+            "decode_seconds": 0.0,
+            "requests": [],
+        }
+
+    def _increment_forward_count(self, kind: str) -> None:
+        metrics = getattr(self, "_perf_metrics", None)
+        if metrics is not None:
+            metrics["forward_counts"][kind] += 1
+
+    def _metrics_synchronize(self) -> None:
+        """Wait for queued device work only when performance metrics are enabled."""
+        if not getattr(self, "_metrics_dir", None):
+            return
+        device_type = self.device.type
+        if device_type == "npu" and hasattr(torch, "npu"):
+            torch.npu.synchronize()
+        elif device_type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(self.device)
+        elif device_type == "xpu" and hasattr(torch, "xpu"):
+            torch.xpu.synchronize()
+
+    def _record_generation_metrics(
+        self,
+        *,
+        generated_tokens: int,
+        decode_seconds: float,
+        block_steps: list[int],
+        block_allocated_steps: list[int],
+        block_forced_tokens: list[int],
+        block_stalled_steps: list[int],
+    ) -> None:
+        metrics = getattr(self, "_perf_metrics", None)
+        if metrics is None or not getattr(self, "_metrics_dir", None):
+            return
+        request_index = metrics["generation_requests"]
+        metrics["generation_requests"] += 1
+        metrics["raw_generated_tokens"] += generated_tokens
+        metrics["decode_seconds"] += decode_seconds
+        metrics["requests"].append(
+            {
+                "request_index": request_index,
+                "generated_tokens": generated_tokens,
+                "decode_seconds": decode_seconds,
+                "block_steps": block_steps,
+                "block_allocated_steps": block_allocated_steps,
+                "block_forced_low_confidence_tokens": block_forced_tokens,
+                "block_stalled_steps": block_stalled_steps,
+            }
+        )
+
+    def _write_perf_metrics(self) -> None:
+        metrics_dir = getattr(self, "_metrics_dir", None)
+        metrics = getattr(self, "_perf_metrics", None)
+        if not metrics_dir or metrics is None:
+            return
+
+        try:
+            output_dir = Path(metrics_dir).resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            rank = int(self.rank)
+            payload = {
+                **metrics,
+                "rank": rank,
+                "world_size": int(self.world_size),
+                "settings": {
+                    "block_length": self.block_length,
+                    "diffusion_steps": self.diffusion_steps,
+                    "threshold": self.threshold,
+                    "diffusion_temperature": self.diffusion_temperature,
+                },
+            }
+            decode_seconds = float(payload["decode_seconds"])
+            payload["decode_tok_per_s"] = (
+                payload["raw_generated_tokens"] / decode_seconds
+                if decode_seconds > 0
+                else 0.0
+            )
+            output_path = output_dir / f"rank_{rank}.json"
+            temporary_path = output_dir / f"rank_{rank}.{os.getpid()}.tmp"
+            temporary_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            temporary_path.replace(output_path)
+        except Exception as error:
+            eval_logger.warning("Could not write diffusion metrics: %s", error)
+
     def _diffusion_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         with torch.no_grad(), self._autocast_context():
+            self._increment_forward_count("scoring")
             return self.model(
                 input_ids=input_ids,
                 attention_mask=self._bidirectional_mask(),
@@ -244,28 +353,39 @@ class HFDiffusionLM(HFLM):
         initial_count: int,
         step_index: int,
         num_steps: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, int, int]:
         candidates = torch.nonzero(mutable[0], as_tuple=False).flatten()
         if candidates.numel() == 0:
-            return torch.zeros_like(mutable)
+            return torch.zeros_like(mutable), 0, 0
+
+        candidate_confidence = confidence[0, candidates]
+        if self.threshold > 0:
+            above_threshold = candidate_confidence >= self.threshold
+            if step_index + 1 == num_steps:
+                # A finite step budget must never leave mask tokens in the output.
+                # The summary records how many low-confidence tokens were forced
+                # on this final step so threshold sweeps remain interpretable.
+                selected = candidates
+                forced_count = int((~above_threshold).sum().item())
+            else:
+                selected = candidates[above_threshold]
+                forced_count = 0
+
+            updates = torch.zeros_like(mutable)
+            updates[0, selected] = True
+            return updates, int(selected.numel()), forced_count
 
         already_committed = initial_count - int(candidates.numel())
         target_committed = math.ceil(initial_count * (step_index + 1) / num_steps)
         required = min(
             max(target_committed - already_committed, 1), int(candidates.numel())
         )
-        candidate_confidence = confidence[0, candidates]
-        if self.threshold > 0:
-            required = max(
-                required, int((candidate_confidence >= self.threshold).sum().item())
-            )
-
         selected = candidates[
             torch.topk(candidate_confidence, k=required, largest=True).indices
         ]
         updates = torch.zeros_like(mutable)
         updates[0, selected] = True
-        return updates
+        return updates, int(selected.numel()), 0
 
     @torch.inference_mode()
     def _generate_one(
@@ -287,6 +407,7 @@ class HFDiffusionLM(HFLM):
         steps_per_block = self._allocate_steps(total_steps, num_blocks)
 
         with self._autocast_context():
+            self._increment_forward_count("prefill")
             prefill = model(
                 input_ids=prompt_ids,
                 use_cache=True,
@@ -297,6 +418,16 @@ class HFDiffusionLM(HFLM):
         next_token = next_token[:, None]
         output_ids = prompt_ids.clone()
         generated = 0
+        block_steps = []
+        block_allocated_steps = []
+        block_forced_tokens = []
+        block_stalled_steps = []
+        generated_output = None
+
+        # Decode throughput excludes prefill and includes all block denoising,
+        # sampling, cache-update forwards and the associated host work.
+        self._metrics_synchronize()
+        decode_start = time.perf_counter()
 
         for block_index in range(num_blocks):
             current_length = min(self.block_length, max_new_tokens - generated)
@@ -316,12 +447,16 @@ class HFDiffusionLM(HFLM):
                 device=prompt_ids.device,
             ).unsqueeze(0)
             cache_position = position_ids[0]
+            actual_steps = 0
+            forced_tokens = 0
+            stalled_steps = 0
 
             for step_index in range(steps_per_block[block_index]):
                 if not mutable.any():
                     break
                 denoise_cache = copy.deepcopy(past_key_values)
                 with self._autocast_context():
+                    self._increment_forward_count("denoise")
                     denoise = model(
                         input_ids=block,
                         attention_mask=self._bidirectional_mask(),
@@ -333,7 +468,7 @@ class HFDiffusionLM(HFLM):
                     )
                 confidence, proposed = self._sample(denoise.logits, temperature)
                 confidence = confidence.masked_fill(~mutable, -torch.inf)
-                updates = self._select_updates(
+                updates, accepted_count, step_forced_tokens = self._select_updates(
                     confidence,
                     mutable,
                     initial_count,
@@ -342,6 +477,14 @@ class HFDiffusionLM(HFLM):
                 )
                 block[updates] = proposed[updates]
                 mutable &= ~updates
+                actual_steps += 1
+                forced_tokens += step_forced_tokens
+                stalled_steps += accepted_count == 0
+
+            block_steps.append(actual_steps)
+            block_allocated_steps.append(steps_per_block[block_index])
+            block_forced_tokens.append(forced_tokens)
+            block_stalled_steps.append(stalled_steps)
 
             if mutable.any():
                 raise RuntimeError(
@@ -359,9 +502,11 @@ class HFDiffusionLM(HFLM):
                 ).flatten()
                 if eos_positions.numel() > 0:
                     end = prompt_length + int(eos_positions[0].item()) + 1
-                    return output_ids[:, :end]
+                    generated_output = output_ids[:, :end]
+                    break
 
             with self._autocast_context():
+                self._increment_forward_count("causal")
                 causal = model(
                     input_ids=block,
                     past_key_values=past_key_values,
@@ -375,7 +520,20 @@ class HFDiffusionLM(HFLM):
                 _, next_token = self._sample(causal.logits[:, -1, :], temperature)
                 next_token = next_token[:, None]
 
-        return output_ids
+        if generated_output is None:
+            generated_output = output_ids
+        self._metrics_synchronize()
+        decode_seconds = time.perf_counter() - decode_start
+        generated_tokens = generated_output.shape[1] - prompt_length
+        self._record_generation_metrics(
+            generated_tokens=generated_tokens,
+            decode_seconds=decode_seconds,
+            block_steps=block_steps,
+            block_allocated_steps=block_allocated_steps,
+            block_forced_tokens=block_forced_tokens,
+            block_stalled_steps=block_stalled_steps,
+        )
+        return generated_output
 
     def _model_generate(
         self,
