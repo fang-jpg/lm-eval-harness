@@ -93,9 +93,11 @@ The shared runner supports these environment overrides:
 - `MASK_TOKEN_ID`: override `config.json` only when necessary.
 - `THRESHOLD`: confidence threshold for committing masked tokens. `0` preserves
   scheduled quota decoding. Values in `(0, 1]` commit every token at or above
-  the threshold and leave the others masked for the next step. The final step
-  allocated to a block commits any remaining masks and reports them as forced
-  low-confidence tokens. `hf_diffusion_xyf2.sh` defaults this to `0.8`.
+  the threshold, then supplement the selection with the highest-confidence
+  remaining tokens when needed to satisfy the current scheduled quota. This
+  guarantees progress on every denoising step and prevents a stalled block from
+  forcing all remaining masks at the end. `hf_diffusion_xyf2.sh` defaults this
+  to `0.8`.
 - `DIFFUSION_TEMPERATURE`, `TOP_K`, `TOP_P`: sampling controls. A task's
   `do_sample: false` generation setting takes precedence and keeps the suite
   deterministic.
@@ -105,6 +107,9 @@ The shared runner supports these environment overrides:
 - `EVAL_MODE`: `ar` selects the ordinary `hf` backend; `diffusion` selects
   `hf-diffusion`.
 - `OUTPUT_ROOT`: result root for a direct runner invocation.
+- `DECODER_CACHE_VERSION`: response-cache namespace for decoder semantics. The
+  runner defaults to the current threshold/quota implementation so responses
+  produced by the old final-step forcing behavior are not reused.
 - `COMPARISON_OUTPUT_ROOT`: root for the three-way comparison. Results are
   separated into `ar_baseline`, `cpt_diffusion_ar/ar`, and
   `cpt_diffusion_ar/diffusion`.

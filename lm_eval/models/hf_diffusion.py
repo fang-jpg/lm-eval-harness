@@ -361,19 +361,34 @@ class HFDiffusionLM(HFLM):
         candidate_confidence = confidence[0, candidates]
         if self.threshold > 0:
             above_threshold = candidate_confidence >= self.threshold
-            if step_index + 1 == num_steps:
-                # A finite step budget must never leave mask tokens in the output.
-                # The summary records how many low-confidence tokens were forced
-                # on this final step so threshold sweeps remain interpretable.
-                selected = candidates
-                forced_count = int((~above_threshold).sum().item())
-            else:
-                selected = candidates[above_threshold]
-                forced_count = 0
+            selected = candidates[above_threshold]
+
+            # Thresholding is allowed to reveal more tokens than the scheduled
+            # decoder, but never fewer than its cumulative quota.  Without this
+            # floor, a high threshold can leave the block unchanged for several
+            # identical deterministic forwards and then force every remaining
+            # mask on the final step, which severely degrades generation quality.
+            already_committed = initial_count - int(candidates.numel())
+            target_committed = math.ceil(
+                initial_count * (step_index + 1) / num_steps
+            )
+            minimum = min(
+                max(target_committed - already_committed, 1),
+                int(candidates.numel()),
+            )
+            if selected.numel() < minimum:
+                needed = minimum - int(selected.numel())
+                remaining_confidence = candidate_confidence.masked_fill(
+                    above_threshold, -torch.inf
+                )
+                supplemental = candidates[
+                    torch.topk(remaining_confidence, k=needed, largest=True).indices
+                ]
+                selected = torch.cat([selected, supplemental])
 
             updates = torch.zeros_like(mutable)
             updates[0, selected] = True
-            return updates, int(selected.numel()), forced_count
+            return updates, int(selected.numel()), 0
 
         already_committed = initial_count - int(candidates.numel())
         target_committed = math.ceil(initial_count * (step_index + 1) / num_steps)

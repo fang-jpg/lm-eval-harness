@@ -78,7 +78,45 @@ def test_threshold_accepts_only_confident_tokens_before_final_step():
     assert forced_count == 0
 
 
-def test_threshold_final_step_forces_remaining_low_confidence_tokens():
+def test_threshold_supplements_highest_confidence_to_meet_quota():
+    lm = HFDiffusionLM.__new__(HFDiffusionLM)
+    lm.threshold = 0.8
+    confidence = torch.tensor([[0.91, 0.79, 0.70, 0.60]])
+    mutable = torch.tensor([[True, True, True, True]])
+
+    updates, accepted_count, forced_count = lm._select_updates(
+        confidence,
+        mutable,
+        initial_count=4,
+        step_index=0,
+        num_steps=2,
+    )
+
+    assert updates.tolist() == [[True, True, False, False]]
+    assert accepted_count == 2
+    assert forced_count == 0
+
+
+def test_threshold_makes_progress_when_no_token_reaches_threshold():
+    lm = HFDiffusionLM.__new__(HFDiffusionLM)
+    lm.threshold = 0.8
+    confidence = torch.tensor([[0.70, 0.79, 0.60]])
+    mutable = torch.tensor([[True, True, True]])
+
+    updates, accepted_count, forced_count = lm._select_updates(
+        confidence,
+        mutable,
+        initial_count=3,
+        step_index=0,
+        num_steps=3,
+    )
+
+    assert updates.tolist() == [[False, True, False]]
+    assert accepted_count == 1
+    assert forced_count == 0
+
+
+def test_threshold_final_step_meets_quota_without_forced_tokens():
     lm = HFDiffusionLM.__new__(HFDiffusionLM)
     lm.threshold = 0.8
     confidence = torch.tensor([[0.91, 0.79, 0.80]])
@@ -94,7 +132,7 @@ def test_threshold_final_step_forces_remaining_low_confidence_tokens():
 
     assert updates.tolist() == [[True, True, True]]
     assert accepted_count == 3
-    assert forced_count == 1
+    assert forced_count == 0
 
 
 def test_single_token_choices_reuse_context_forward():
@@ -157,14 +195,15 @@ def test_tiny_qwen3_records_threshold_generation_metrics():
     assert not output[:, prompt.shape[1] :].eq(lm.mask_token_id).any()
     assert lm._perf_metrics["forward_counts"] == {
         "prefill": 1,
-        "denoise": 4,
+        "denoise": 2,
         "causal": 2,
         "scoring": 0,
     }
-    assert lm._perf_metrics["requests"][0]["block_steps"] == [2, 2]
+    assert lm._perf_metrics["requests"][0]["block_steps"] == [1, 1]
     assert lm._perf_metrics["requests"][0][
         "block_forced_low_confidence_tokens"
-    ] == [1, 1]
+    ] == [0, 0]
+    assert lm._perf_metrics["requests"][0]["block_stalled_steps"] == [0, 0]
 
 
 def test_constructor_forces_eager_attention_on_loaded_checkpoint(tmp_path):

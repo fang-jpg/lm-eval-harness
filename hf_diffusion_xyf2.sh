@@ -59,9 +59,9 @@ BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-}"
 DIFFUSION_TEMPERATURE="${DIFFUSION_TEMPERATURE:-0.0}"
-# THRESHOLD=0 keeps scheduled quota decoding. A value in (0, 1] enables
-# confidence-threshold decoding; the final allocated step commits any masks
-# still below the threshold and records them as forced low-confidence tokens.
+# THRESHOLD=0 keeps scheduled quota decoding. A value in (0, 1] accepts every
+# token above the threshold, then supplements with the highest-confidence
+# remaining tokens as needed to satisfy the current scheduled quota.
 THRESHOLD="${THRESHOLD:-0.8}"
 TOP_K="${TOP_K:-0}"
 TOP_P="${TOP_P:-1.0}"
@@ -75,6 +75,9 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 # If the long-running inference succeeds but the final HCCL gather fails, the
 # next attempt reads these files and only recomputes genuinely missing samples.
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
+# Bump this whenever decoding semantics change so an otherwise identical run
+# cannot reuse responses produced by an older decoder implementation.
+DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-threshold-scheduled-quota-v2}"
 # Total attempts, including the first one.  A retry only computes responses
 # still missing from each rank-local cache, so an extra attempt is inexpensive
 # and covers a slow rank that needs more than one timeout window to catch up.
@@ -112,7 +115,7 @@ fi
 # the model identity or hf-diffusion-specific decoding settings.  Namespace
 # the cache with those arguments so changing a checkpoint/setting cannot reuse
 # stale responses accidentally.
-CACHE_CONFIG_ID="$(python -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${MODEL_ARGS}")"
+CACHE_CONFIG_ID="$(python -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}")"
 
 ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --main_process_port "${MASTER_PORT}")
 if (( NUM_DEVICES > 1 )); then
@@ -157,6 +160,7 @@ run_task() {
   echo "Summary log: ${summary_log}"
   echo "Metrics dir: ${metrics_run_dir}"
   echo "Cache ID   : ${CACHE_CONFIG_ID}"
+  echo "Decoder ver: ${DECODER_CACHE_VERSION}"
   echo "Cache files: ${cache_prefix}_rank<N>.db"
   echo "HCCL wait  : connect=${HCCL_CONNECT_TIMEOUT}s, exec=${HCCL_EXEC_TIMEOUT}s"
   echo "Start time : $(date '+%F %T')"
