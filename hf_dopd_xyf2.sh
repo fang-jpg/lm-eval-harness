@@ -76,7 +76,7 @@ echo "HF model      : ${HF_MODEL_PATH}"
 # DIFFUSION_STEPS empty makes hf-diffusion use max_new_tokens total steps,
 # which allocates approximately four denoising steps to every four-token block.
 MODEL_PATH="${HF_MODEL_PATH}" \
-TASKS="${TASKS:-mmlu,boolq,bbh}" \
+TASKS="${TASKS:-gsm8k,humaneval}" \
 BLOCK_LENGTH="${BLOCK_LENGTH:-4}" \
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}" \
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-151669}" \

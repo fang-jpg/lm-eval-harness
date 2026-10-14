@@ -53,7 +53,7 @@ export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
 
-MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/phase4_cpt_ar_duffision_0910/models/global_step_102500/}"
+MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/phase4_cpt_ar_duffision_0814/models/global_step_102500/}"
 TASKS="${TASKS:-mmlu,gsm8k,humaneval,boolq,bbh}"
 BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}"
@@ -69,7 +69,7 @@ MC_NUM="${MC_NUM:-128}"
 MC_BATCH_SIZE="${MC_BATCH_SIZE:-16}"
 SEED="${SEED:-42}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_diffusion}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_diffusion_threshold0.8_0814}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
 # Every completed model response is committed to a rank-local SQLite file.
 # If the long-running inference succeeds but the final HCCL gather fails, the
@@ -234,12 +234,12 @@ run_task() {
 # task_selected mmlu && run_task mmlu_generative 5
 
 # All five tasks now call block-diffusion generate_until.
-# task_selected gsm8k && run_task gsm8k 5
-# task_selected humaneval && run_task humaneval 0 --confirm_run_unsafe_code
+task_selected gsm8k && run_task gsm8k 5
+task_selected humaneval && run_task humaneval 0 --confirm_run_unsafe_code
 # task_selected boolq && run_task boolq-seq2seq 5
-task_selected bbh && run_task bbh 3
+# task_selected bbh && run_task bbh 3
 
-task_selected mmlu && run_task mmlu_generative 5
-task_selected boolq && run_task boolq-seq2seq 5
+# task_selected mmlu && run_task mmlu_generative 5
+# task_selected boolq && run_task boolq-seq2seq 5
 
 echo "Diffusion evaluation finished. Results: ${RUN_OUTPUT}"
