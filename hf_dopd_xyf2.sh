@@ -99,12 +99,12 @@ PY
 
 MINDSPEED_ROOT="${MINDSPEED_ROOT:-${SCRIPT_DIR}/../MindSpeed-LLM}"
 
-DCP_MODEL_PATH="${DCP_MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_dopd_1010/checkpoints/global_step_483_final}"
+DCP_MODEL_PATH="${DCP_MODEL_PATH:-/mnt/pipeline-data/f50058111/model_train/opd/qwen3_1.7b_dopd_paper_1node_8card_1019/checkpoints/global_step_100}"
 HF_MODEL_PATH="${HF_MODEL_PATH:-${DCP_MODEL_PATH%/}/hf_ckpt}"
 DOPD_CONFIG="${DOPD_CONFIG:-$(dirname "$(dirname "${DCP_MODEL_PATH%/}")")/dopd_config.json}"
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-}"
 
-export HF_HOME="${HF_HOME:-/share/f50058111/huggingface_cache}"
+export HF_HOME="${HF_HOME:-/mnt/pipeline-data/f50058111/huggingface_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
@@ -277,12 +277,13 @@ run_task() {
 }
 
 echo "===== d-OPD 论文附录 C.4 对齐评测 ====="
-task_selected mmlu && run_task mmlu mmlu_generative 14042
-task_selected mmlu_pro && run_task mmlu_pro mmlu_pro 12032
-task_selected gpqa_diamond && run_task gpqa_diamond gpqa_diamond_cot_zeroshot 198
-task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319
-task_selected math500 && run_task math500 hendrycks_math500 500
-task_selected aime25 && run_task aime25 aime25 30
+# task_selected mmlu && run_task mmlu mmlu_generative 14042
+# task_selected mmlu_pro && run_task mmlu_pro mmlu_pro 12032
+# task_selected gpqa_diamond && run_task gpqa_diamond gpqa_diamond_cot_zeroshot 198
+# task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319
+# task_selected math500 && run_task math500 hendrycks_math500 500
+# task_selected aime25 && run_task aime25 aime25 30
+task_selected gsm8k && run_task gsm8k 5
 
 echo "评测完成: ${RUN_OUTPUT}"
 echo "注意：论文还在 step 50,100,...,450,483 中按六项平均分选同一个最佳 checkpoint。"
