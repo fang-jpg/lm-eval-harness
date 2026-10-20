@@ -55,17 +55,13 @@ if [[ ! -d "${ASCEND_OPP_PATH}" ]]; then
 fi
 
 # Older kernel packages have one JSON per op; newer packages use a full kernel
-# index.  Accept either layout, but require a readable 910B marker before NPU
-# initialization so a stale path from the source server cannot be used.
-KERNEL_INDEX="$(find "${ASCEND_OPP_PATH}" -type f \
-  \( -iname 'cast.json' -o -iname 'binary_info_config.json' \) \
-  -ipath '*ascend910b*' -print -quit 2>/dev/null || true)"
-if [[ -z "${KERNEL_INDEX}" ]]; then
-  cat >&2 <<EOF
-[CANN] No Ascend 910B Cast/full-kernel index was found under:
-[CANN]   ${ASCEND_OPP_PATH}
-[CANN] This is not the correct opp root, or the copied kernels package is incomplete.
-EOF
+# index.  The checker verifies that a full index actually mentions Cast; an
+# unrelated ops_oam index is not sufficient.
+if ! KERNEL_INDEX="$("${PYTHON_BIN}" \
+  "${SCRIPT_DIR}/scripts/find_working_cann.py" \
+  --check-opp "${ASCEND_OPP_PATH}")"; then
+  echo "[CANN] This is not the correct opp root, or its 910B kernels package is incomplete." >&2
+  echo "[CANN] Run: ${PYTHON_BIN} scripts/find_working_cann.py" >&2
   exit 2
 fi
 
