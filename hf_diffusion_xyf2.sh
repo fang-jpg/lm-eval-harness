@@ -4,35 +4,83 @@
 # 1. Load CANN
 # ==============================
 
-set +e
-set +u
+set -eo pipefail
 
-# export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
 
-# source /mnt/pipeline-data/f50058111/activate_cann_910b_9.1.sh
+# The CANN operator package on this machine was copied from another server, so
+# never guess its old absolute path.  CANN_ENV is optional; CANN_OPP_PATH must
+# be the real `opp` directory visible on the current server/container.
+CANN_ENV="${CANN_ENV:-}"
+CANN_OPP_PATH="${CANN_OPP_PATH:-}"
 
-# set -euo pipefail
+if [[ -n "${CANN_ENV}" ]]; then
+  if [[ ! -f "${CANN_ENV}" ]]; then
+    echo "[CANN] CANN_ENV does not exist: ${CANN_ENV}" >&2
+    exit 2
+  fi
+  echo "[CANN] Loading ${CANN_ENV}"
+  # Vendor activation scripts can reference unset variables or return nonzero
+  # from optional probes.  The real NPU Cast check below is authoritative.
+  set +e
+  set +u
+  export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+  # shellcheck disable=SC1090
+  source "${CANN_ENV}"
+else
+  echo "[CANN] Reusing the runtime environment used by hf_xyf2.sh."
+fi
+set -euo pipefail
 
-# SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
-# echo "===== CANN environment loaded ====="
-# echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
-# echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
+if [[ -n "${CANN_OPP_PATH}" ]]; then
+  export ASCEND_OPP_PATH="${CANN_OPP_PATH%/}"
+fi
 
-# python - <<'PY'
-# import torch
-# import torch_npu
-# print("torch =", torch.__version__)
-# print("NPU available =", torch.npu.is_available())
-# PY
+if [[ -z "${ASCEND_OPP_PATH:-}" ]]; then
+  cat >&2 <<'EOF'
+[CANN] ASCEND_OPP_PATH is empty.
+[CANN] Locate the copied 910B operator package, then rerun with:
+[CANN]   CANN_OPP_PATH=/actual/path/to/opp bash hf_diffusion_xyf2.sh
+EOF
+  exit 2
+fi
+
+if [[ ! -d "${ASCEND_OPP_PATH}" ]]; then
+  echo "[CANN] ASCEND_OPP_PATH does not exist on this server: ${ASCEND_OPP_PATH}" >&2
+  echo "[CANN] Set CANN_OPP_PATH to the copied package's real opp directory." >&2
+  exit 2
+fi
+
+# Older kernel packages have one JSON per op; newer packages use a full kernel
+# index.  Accept either layout, but require a readable 910B marker before NPU
+# initialization so a stale path from the source server cannot be used.
+KERNEL_INDEX="$(find "${ASCEND_OPP_PATH}" -type f \
+  \( -iname 'cast.json' -o -iname 'binary_info_config.json' \) \
+  -ipath '*ascend910b*' -print -quit 2>/dev/null || true)"
+if [[ -z "${KERNEL_INDEX}" ]]; then
+  cat >&2 <<EOF
+[CANN] No Ascend 910B Cast/full-kernel index was found under:
+[CANN]   ${ASCEND_OPP_PATH}
+[CANN] This is not the correct opp root, or the copied kernels package is incomplete.
+EOF
+  exit 2
+fi
+
+echo "===== CANN environment ====="
+echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
+echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
+echo "910B kernel index=${KERNEL_INDEX}"
 
 # ==============================
 # 2. HuggingFace offline cache
 # ==============================
 
-export HF_HOME=/mnt/pipeline-data/f50058111/huggingface_cache
-export HF_HUB_CACHE=/mnt/pipeline-data/f50058111/huggingface_cache/hub
-export HF_DATASETS_CACHE=/mnt/pipeline-data/f50058111/huggingface_cache/datasets
+export HF_HOME="${HF_HOME:-/mnt/pipeline-data/f50058111/huggingface_cache}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
@@ -84,6 +132,36 @@ DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-threshold-scheduled-quota-v2}"
 MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
 
 NUM_DEVICES="$(awk -F',' '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
+if ! [[ "${NUM_DEVICES}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ASCEND_RT_VISIBLE_DEVICES must contain at least one device." >&2
+  exit 2
+fi
+
+# Importing torch_npu is not enough to prove that the operator package is
+# configured.  This is the exact dtype conversion that previously failed in
+# hf_diffusion.py at attention_mask.bool(); run it before loading eight models.
+"${PYTHON_BIN}" - <<'PY'
+import torch
+import torch_npu  # noqa: F401
+
+if not torch.npu.is_available():
+    raise SystemExit("[CANN] NPU is unavailable; check CANN_ENV and torch_npu.")
+
+try:
+    torch.npu.set_device(0)
+    attention_mask = torch.tensor([[1, 0]], dtype=torch.int64, device="npu:0")
+    attention_mask.bool()
+    torch.npu.synchronize()
+except Exception as exc:
+    raise SystemExit(
+        "[CANN] NPU Cast self-check failed although a 910B kernel index exists. "
+        "Check CANN_OPP_PATH, file permissions, and the CANN/torch_npu version match.\n"
+        f"Original error: {exc}"
+    ) from exc
+
+print(f"[CANN] NPU Cast self-check passed (torch={torch.__version__}).")
+PY
+
 RUN_NAME="$(basename "${MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
@@ -115,9 +193,9 @@ fi
 # the model identity or hf-diffusion-specific decoding settings.  Namespace
 # the cache with those arguments so changing a checkpoint/setting cannot reuse
 # stale responses accidentally.
-CACHE_CONFIG_ID="$(python -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}")"
+CACHE_CONFIG_ID="$("${PYTHON_BIN}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}")"
 
-ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --main_process_port "${MASTER_PORT}")
+ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --num_machines 1 --mixed_precision no --dynamo_backend no --main_process_port "${MASTER_PORT}")
 if (( NUM_DEVICES > 1 )); then
   ACCELERATE_ARGS=(--multi_gpu "${ACCELERATE_ARGS[@]}")
 fi
@@ -178,7 +256,7 @@ run_task() {
       | tee -a "${log_file}"
 
     if HF_DIFFUSION_METRICS_DIR="${attempt_metrics_dir}" \
-      accelerate launch "${ACCELERATE_ARGS[@]}" \
+      "${PYTHON_BIN}" -m accelerate.commands.launch "${ACCELERATE_ARGS[@]}" \
       -m lm_eval \
       --model hf-diffusion \
       --model_args "${MODEL_ARGS}" \
@@ -196,7 +274,7 @@ run_task() {
 
       echo "[SUCCESS] ${task} completed at $(date '+%F %T')" \
         | tee -a "${log_file}"
-      if python "${SCRIPT_DIR}/scripts/summarize_diffusion_metrics.py" \
+      if "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/summarize_diffusion_metrics.py" \
         --metrics-dir "${metrics_run_dir}" \
         --results-dir "${RUN_OUTPUT}/${task}" \
         --output "${summary_log}" \
