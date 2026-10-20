@@ -161,6 +161,63 @@ def _last_output_lines(stdout: str, stderr: str, limit: int = 14) -> str:
     return "\n".join(lines[-limit:])
 
 
+def rebase_environment(
+    environment: dict[str, str], old_root: str, new_root: str, opp_root: Path
+) -> dict[str, str]:
+    """Relocate paths exported by a set_env.sh copied from another server."""
+    rebased = dict(environment)
+    if old_root and old_root != new_root:
+        rebased = {
+            name: value.replace(old_root, new_root)
+            for name, value in rebased.items()
+        }
+    rebased["ASCEND_HOME_PATH"] = new_root
+    rebased["ASCEND_TOOLKIT_HOME"] = new_root
+    rebased["ASCEND_OPP_PATH"] = str(opp_root)
+    return rebased
+
+
+def environment_after_sourcing(
+    env_script: Path, base_environment: dict[str, str], timeout_seconds: int = 30
+) -> tuple[dict[str, str] | None, str]:
+    """Source a vendor script in a child shell and capture its exported env."""
+    command = [
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+        (
+            'set +e; set +u; export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"; '
+            'source "$1" >/dev/null 2>&1; env -0'
+        ),
+        "cann-env",
+        str(env_script),
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed bash program, argv paths.
+            command,
+            env=base_environment,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return None, f"sourcing {env_script} timed out: {exc}"
+    if result.returncode != 0 or not result.stdout:
+        stderr = result.stderr.decode(errors="replace")
+        return None, f"could not source {env_script}: {stderr.strip()}"
+
+    captured: dict[str, str] = {}
+    for entry in result.stdout.split(b"\0"):
+        if not entry or b"=" not in entry:
+            continue
+        raw_name, raw_value = entry.split(b"=", 1)
+        captured[raw_name.decode(errors="surrogateescape")] = raw_value.decode(
+            errors="surrogateescape"
+        )
+    return captured, ""
+
+
 def probe_candidate(
     opp_root: Path,
     env_script: Path | None,
@@ -168,27 +225,21 @@ def probe_candidate(
 ) -> tuple[bool, str]:
     """Run Cast in a new process so every candidate gets a clean CANN init."""
     environment = os.environ.copy()
-    environment["ASCEND_OPP_PATH"] = str(opp_root)
-    if env_script is None:
-        command = [sys.executable, "-c", PROBE_CODE]
-    else:
-        shell_program = (
-            'set +e; set +u; export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"; '
-            'source "$1" >/dev/null 2>&1; export ASCEND_OPP_PATH="$2"; '
-            'exec "$3" -c "$4"'
+    new_root = str(opp_root.parent)
+    if env_script is not None:
+        sourced, error = environment_after_sourcing(env_script, environment)
+        if sourced is None:
+            return False, error
+        old_root = sourced.get("ASCEND_HOME_PATH", "")
+        environment = rebase_environment(
+            sourced,
+            old_root=old_root,
+            new_root=new_root,
+            opp_root=opp_root,
         )
-        command = [
-            "bash",
-            "--noprofile",
-            "--norc",
-            "-c",
-            shell_program,
-            "cann-probe",
-            str(env_script),
-            str(opp_root),
-            sys.executable,
-            PROBE_CODE,
-        ]
+    else:
+        environment["ASCEND_OPP_PATH"] = str(opp_root)
+    command = [sys.executable, "-c", PROBE_CODE]
     try:
         result = subprocess.run(  # noqa: S603 - argv is passed without shell=True.
             command,
@@ -294,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             print(output)
         if passed:
             print("\n[WORKING] A complete, executable CANN/OPP candidate was found.")
-            prefix = f"CANN_OPP_PATH={opp_root}"
+            prefix = f"CANN_ROOT={opp_root.parent} CANN_OPP_PATH={opp_root}"
             if env_script is not None:
                 prefix = f"CANN_ENV={env_script} {prefix}"
             print(f"Run:\n  {prefix} bash hf_diffusion_xyf2.sh")

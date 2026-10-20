@@ -14,6 +14,10 @@ cd "${SCRIPT_DIR}"
 # be the real `opp` directory visible on the current server/container.
 CANN_ENV="${CANN_ENV:-}"
 CANN_OPP_PATH="${CANN_OPP_PATH:-}"
+CANN_ROOT="${CANN_ROOT:-}"
+if [[ -z "${CANN_ROOT}" && -n "${CANN_OPP_PATH}" ]]; then
+  CANN_ROOT="$(dirname -- "${CANN_OPP_PATH%/}")"
+fi
 
 if [[ -n "${CANN_ENV}" ]]; then
   if [[ ! -f "${CANN_ENV}" ]]; then
@@ -31,9 +35,37 @@ if [[ -n "${CANN_ENV}" ]]; then
 else
   echo "[CANN] Reusing the runtime environment used by hf_xyf2.sh."
 fi
+SOURCED_CANN_ROOT="${ASCEND_HOME_PATH:-}"
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
+
+# A copied set_env.sh can export absolute paths from its source server. Rebase
+# all standard path variables and ASCEND_* variables onto the actual local
+# CANN root before importing torch_npu. The copied files are not modified.
+if [[ -n "${CANN_ROOT}" ]]; then
+  if [[ ! -d "${CANN_ROOT}" ]]; then
+    echo "[CANN] CANN_ROOT does not exist on this server: ${CANN_ROOT}" >&2
+    exit 2
+  fi
+  if [[ -n "${SOURCED_CANN_ROOT}" && "${SOURCED_CANN_ROOT}" != "${CANN_ROOT}" ]]; then
+    rebase_cann_variable() {
+      local variable_name="$1"
+      local old_value="${!variable_name:-}"
+      if [[ "${old_value}" == *"${SOURCED_CANN_ROOT}"* ]]; then
+        printf -v "${variable_name}" '%s' \
+          "${old_value//${SOURCED_CANN_ROOT}/${CANN_ROOT}}"
+        export "${variable_name}"
+      fi
+    }
+    while IFS= read -r variable_name; do
+      rebase_cann_variable "${variable_name}"
+    done < <(compgen -e)
+    echo "[CANN] Relocated environment: ${SOURCED_CANN_ROOT} -> ${CANN_ROOT}"
+  fi
+  export ASCEND_HOME_PATH="${CANN_ROOT}"
+  export ASCEND_TOOLKIT_HOME="${CANN_ROOT}"
+fi
 
 if [[ -n "${CANN_OPP_PATH}" ]]; then
   export ASCEND_OPP_PATH="${CANN_OPP_PATH%/}"

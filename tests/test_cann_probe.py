@@ -64,3 +64,25 @@ def test_discovers_renamed_copied_opp_root(tmp_path):
     assert MODULE.discover_opp_roots([tmp_path], max_depth=5) == [
         copied_opp.resolve()
     ]
+
+
+def test_rebases_all_paths_exported_by_copied_set_env(tmp_path):
+    old_root = "/share/user/copied-cann/cann-9.1.0"
+    new_root = "/mnt/pipeline/copied-cann/cann-9.1.0"
+    opp = Path(new_root) / "opp"
+    environment = {
+        "ASCEND_HOME_PATH": old_root,
+        "ASCEND_OPP_PATH": f"{old_root}/opp",
+        "LD_LIBRARY_PATH": f"{old_root}/lib64:/usr/lib64",
+        "PYTHONPATH": f"{old_root}/python/site-packages",
+        "UNCHANGED": "/somewhere/else",
+    }
+
+    rebased = MODULE.rebase_environment(environment, old_root, new_root, opp)
+
+    assert rebased["ASCEND_HOME_PATH"] == new_root
+    assert rebased["ASCEND_TOOLKIT_HOME"] == new_root
+    assert rebased["ASCEND_OPP_PATH"] == str(opp)
+    assert rebased["LD_LIBRARY_PATH"] == f"{new_root}/lib64:/usr/lib64"
+    assert rebased["PYTHONPATH"] == f"{new_root}/python/site-packages"
+    assert rebased["UNCHANGED"] == "/somewhere/else"
