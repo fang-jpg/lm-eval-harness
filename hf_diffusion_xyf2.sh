@@ -7,32 +7,32 @@
 set +e
 set +u
 
-export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+# export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
 
-source /share/f50058111/activate_cann_910b_9.1.sh
+# source /mnt/pipeline-data/f50058111/activate_cann_910b_9.1.sh
 
-set -euo pipefail
+# set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "===== CANN environment loaded ====="
-echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
-echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
+# echo "===== CANN environment loaded ====="
+# echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
+# echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
 
-python - <<'PY'
-import torch
-import torch_npu
-print("torch =", torch.__version__)
-print("NPU available =", torch.npu.is_available())
-PY
+# python - <<'PY'
+# import torch
+# import torch_npu
+# print("torch =", torch.__version__)
+# print("NPU available =", torch.npu.is_available())
+# PY
 
 # ==============================
 # 2. HuggingFace offline cache
 # ==============================
 
-export HF_HOME=/share/f50058111/huggingface_cache
-export HF_HUB_CACHE=/share/f50058111/huggingface_cache/hub
-export HF_DATASETS_CACHE=/share/f50058111/huggingface_cache/datasets
+export HF_HOME=/mnt/pipeline-data/f50058111/huggingface_cache
+export HF_HUB_CACHE=/mnt/pipeline-data/f50058111/huggingface_cache/hub
+export HF_DATASETS_CACHE=/mnt/pipeline-data/f50058111/huggingface_cache/datasets
 
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
@@ -53,7 +53,7 @@ export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
 
-MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/phase4_cpt_ar_duffision_0916/models/global_step_102500/}"
+MODEL_PATH="${MODEL_PATH:-/mnt/pipeline-data/f50058111/model_train/ckpt/models/global_step_102500/}"
 TASKS="${TASKS:-mmlu,gsm8k,humaneval,boolq,bbh}"
 BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}"
