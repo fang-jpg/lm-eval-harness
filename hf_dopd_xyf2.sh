@@ -1,16 +1,102 @@
 #!/usr/bin/env bash
-set +e
-set +u
 
 # d-OPD paper Appendix C.4 evaluation for one 8-card Ascend node.
 # Decoder semantics are intentionally fixed; only paths, device/runtime knobs,
 # selected tasks, and LIMIT (for a non-comparable smoke test) are configurable.
 
-export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
-source /share/f50058111/activate_cann_910b_9.1.sh
-set -euo pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+PYTHON_BIN="${PYTHON_BIN:-python}"
+export CANN_ROOT="/mnt/pipeline-data/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
+export CANN_ENV="${CANN_ROOT}/set_env.sh"
+export CANN_OPP_PATH="${CANN_ROOT}/opp"
+
+if [[ ! -f "${CANN_ENV}" ]]; then
+  echo "[CANN] CANN_ENV does not exist: ${CANN_ENV}" >&2
+  exit 2
+fi
+if [[ ! -d "${CANN_ROOT}" ]]; then
+  echo "[CANN] CANN_ROOT does not exist: ${CANN_ROOT}" >&2
+  exit 2
+fi
+if [[ ! -d "${CANN_OPP_PATH}" ]]; then
+  echo "[CANN] CANN_OPP_PATH does not exist: ${CANN_OPP_PATH}" >&2
+  exit 2
+fi
+
+echo "[CANN] Loading ${CANN_ENV}"
+set +e
+set +u
+export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+# shellcheck disable=SC1090
+source "${CANN_ENV}"
+SOURCED_CANN_ROOT="${ASCEND_HOME_PATH:-}"
+set -euo pipefail
+
+# The package was copied from another server.  If set_env.sh still contains
+# paths from that machine, rewrite the exported values in memory only.
+if [[ -n "${SOURCED_CANN_ROOT}" && "${SOURCED_CANN_ROOT}" != "${CANN_ROOT}" ]]; then
+  rebase_cann_variable() {
+    local variable_name="$1"
+    local old_value="${!variable_name:-}"
+    if [[ "${old_value}" == *"${SOURCED_CANN_ROOT}"* ]]; then
+      printf -v "${variable_name}" '%s' \
+        "${old_value//${SOURCED_CANN_ROOT}/${CANN_ROOT}}"
+      export "${variable_name}"
+    fi
+  }
+  while IFS= read -r variable_name; do
+    rebase_cann_variable "${variable_name}"
+  done < <(compgen -e)
+  echo "[CANN] Relocated environment: ${SOURCED_CANN_ROOT} -> ${CANN_ROOT}"
+fi
+
+export ASCEND_HOME_PATH="${CANN_ROOT}"
+export ASCEND_TOOLKIT_HOME="${CANN_ROOT}"
+export ASCEND_OPP_PATH="${CANN_OPP_PATH%/}"
+
+if ! KERNEL_INDEX="$("${PYTHON_BIN}" \
+  "${SCRIPT_DIR}/scripts/find_working_cann.py" \
+  --check-opp "${ASCEND_OPP_PATH}")"; then
+  echo "[CANN] The configured 910B operator package is incomplete or incompatible." >&2
+  exit 2
+fi
+
+echo "===== CANN environment ====="
+echo "CANN_ENV=${CANN_ENV}"
+echo "CANN_ROOT=${CANN_ROOT}"
+echo "CANN_OPP_PATH=${CANN_OPP_PATH}"
+echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
+echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
+echo "910B kernel index=${KERNEL_INDEX}"
+
+# Verify the same Cast operation used by the diffusion attention-mask path
+# before checkpoint conversion and eight-rank model loading begin.
+"${PYTHON_BIN}" - <<'PY'
+import torch
+import torch_npu  # noqa: F401
+
+if not torch.npu.is_available():
+    raise SystemExit("[CANN] NPU is unavailable; check CANN_ENV and torch_npu.")
+
+try:
+    torch.npu.set_device(0)
+    attention_mask = torch.tensor([[1, 0]], dtype=torch.int64, device="npu:0")
+    attention_mask.bool()
+    torch.npu.synchronize()
+except Exception as exc:
+    raise SystemExit(
+        "[CANN] NPU Cast self-check failed although a 910B kernel index exists. "
+        "Check CANN_OPP_PATH, file permissions, and the CANN/torch_npu version match.\n"
+        f"Original error: {exc}"
+    ) from exc
+
+print(f"[CANN] NPU Cast self-check passed (torch={torch.__version__}).")
+PY
+
 MINDSPEED_ROOT="${MINDSPEED_ROOT:-${SCRIPT_DIR}/../MindSpeed-LLM}"
 
 DCP_MODEL_PATH="${DCP_MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_dopd_1010/checkpoints/global_step_483_final}"

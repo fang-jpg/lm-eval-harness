@@ -9,15 +9,11 @@ set -eo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-# The CANN operator package on this machine was copied from another server, so
-# never guess its old absolute path.  CANN_ENV is optional; CANN_OPP_PATH must
-# be the real `opp` directory visible on the current server/container.
-CANN_ENV="${CANN_ENV:-}"
-CANN_OPP_PATH="${CANN_OPP_PATH:-}"
-CANN_ROOT="${CANN_ROOT:-}"
-if [[ -z "${CANN_ROOT}" && -n "${CANN_OPP_PATH}" ]]; then
-  CANN_ROOT="$(dirname -- "${CANN_OPP_PATH%/}")"
-fi
+# Verified CANN 9.1 toolkit and 910B operator package on this server.  Assign
+# these explicitly so stale CANN 8.5 variables in the parent shell cannot win.
+export CANN_ROOT="/mnt/pipeline-data/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
+export CANN_ENV="${CANN_ROOT}/set_env.sh"
+export CANN_OPP_PATH="${CANN_ROOT}/opp"
 
 if [[ -n "${CANN_ENV}" ]]; then
   if [[ ! -f "${CANN_ENV}" ]]; then
@@ -98,6 +94,9 @@ if ! KERNEL_INDEX="$("${PYTHON_BIN}" \
 fi
 
 echo "===== CANN environment ====="
+echo "CANN_ENV=${CANN_ENV}"
+echo "CANN_ROOT=${CANN_ROOT}"
+echo "CANN_OPP_PATH=${CANN_OPP_PATH}"
 echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
 echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
 echo "910B kernel index=${KERNEL_INDEX}"
