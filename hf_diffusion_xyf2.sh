@@ -283,6 +283,18 @@ run_task() {
     echo "[ATTEMPT ${attempt}/${MAX_TASK_ATTEMPTS}] ${task}" \
       | tee -a "${log_file}"
 
+    # A killed multi-rank run can leave an individual SQLite response cache
+    # malformed.  Keep healthy rank caches, but move broken databases and
+    # their WAL/SHM files aside before every attempt so retries can recover.
+    if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/prepare_sqlite_cache.py" \
+      --cache-prefix "${cache_prefix}" \
+      --quarantine-root "${cache_prefix}_corrupt" \
+      2>&1 | tee -a "${log_file}"; then
+      echo "[ERROR] Unable to validate/quarantine response caches." \
+        | tee -a "${log_file}"
+      return 1
+    fi
+
     if HF_DIFFUSION_METRICS_DIR="${attempt_metrics_dir}" \
       "${PYTHON_BIN}" -m accelerate.commands.launch "${ACCELERATE_ARGS[@]}" \
       -m lm_eval \
