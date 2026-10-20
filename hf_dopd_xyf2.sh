@@ -9,6 +9,9 @@ set -eo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+DOPD_EVAL_SCRIPT_VERSION="dopd-eval-gsm8k-5shot-v3"
+echo "[d-OPD] Evaluation script version: ${DOPD_EVAL_SCRIPT_VERSION}"
+
 PYTHON_BIN="${PYTHON_BIN:-python}"
 export CANN_ROOT="/mnt/pipeline-data/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
 export CANN_ENV="${CANN_ROOT}/set_env.sh"
@@ -150,7 +153,7 @@ if [[ ! -f "${MINDSPEED_ROOT}/mindspeed_llm/fsdp2/checkpoint/merge_dcp_to_hf.py"
 fi
 
 if [[ -z "${BASE_MODEL_PATH}" && -f "${DOPD_CONFIG}" ]]; then
-  BASE_MODEL_PATH="$(python -c 'import json, sys; cfg=json.load(open(sys.argv[1], encoding="utf-8")); print(cfg.get("model", {}).get("model_name_or_path", ""))' "${DOPD_CONFIG}")"
+  BASE_MODEL_PATH="$("${PYTHON_BIN}" -c 'import json, sys; cfg=json.load(open(sys.argv[1], encoding="utf-8")); print(cfg.get("model", {}).get("model_name_or_path", ""))' "${DOPD_CONFIG}")"
 fi
 if [[ -z "${BASE_MODEL_PATH}" || ! -f "${BASE_MODEL_PATH}/config.json" ]]; then
   echo "找不到训练所用的 Qwen3-1.7B-Base；请设置 BASE_MODEL_PATH。" >&2
@@ -160,20 +163,23 @@ fi
 
 if [[ ! -f "${HF_MODEL_PATH}/model.safetensors" && ! -f "${HF_MODEL_PATH}/model.safetensors.index.json" ]]; then
   echo "===== 将 d-OPD DCP 转换为 Hugging Face checkpoint ====="
-  python "${MINDSPEED_ROOT}/mindspeed_llm/fsdp2/checkpoint/merge_dcp_to_hf.py" \
+  "${PYTHON_BIN}" "${MINDSPEED_ROOT}/mindspeed_llm/fsdp2/checkpoint/merge_dcp_to_hf.py" \
     --load-dir "${DCP_MODEL_PATH}" \
-    --save-dir "${HF_MODEL_PATH}" \
-    --model-configs "${BASE_MODEL_PATH}"
+    --save-dir "${HF_MODEL_PATH}"
 else
   echo "===== 复用已有 Hugging Face checkpoint: ${HF_MODEL_PATH} ====="
 fi
 
-if [[ ! -f "${HF_MODEL_PATH}/tokenizer_config.json" ]]; then
-  python -c 'from transformers import AutoTokenizer; import sys; AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True, trust_remote_code=True).save_pretrained(sys.argv[2])' \
-    "${BASE_MODEL_PATH}" "${HF_MODEL_PATH}"
-fi
+"${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/prepare_dopd_hf_checkpoint.py" \
+  --source-model-dir "${BASE_MODEL_PATH}" \
+  --output-dir "${HF_MODEL_PATH}" \
+  --mask-token-id "${MASK_TOKEN_ID}"
 
 NUM_DEVICES="$(awk -F',' '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
+if ! [[ "${NUM_DEVICES}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ASCEND_RT_VISIBLE_DEVICES 必须至少包含一张 NPU。" >&2
+  exit 2
+fi
 RUN_NAME="$(basename "${DCP_MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
@@ -183,6 +189,10 @@ mkdir -p "${RUN_OUTPUT}"
 
 if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "MAX_TASK_ATTEMPTS 必须是正整数，当前为: ${MAX_TASK_ATTEMPTS}" >&2
+  exit 2
+fi
+if ! [[ "${MC_NUM}" =~ ^[1-9][0-9]*$ && "${MC_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MC_NUM 和 MC_BATCH_SIZE 必须是正整数。" >&2
   exit 2
 fi
 if [[ -n "${LIMIT}" ]]; then
@@ -197,7 +207,7 @@ if [[ -n "${MODEL_DEVICE}" ]]; then
   MODEL_ARGS+=",device=${MODEL_DEVICE}"
 fi
 
-CACHE_CONFIG_ID="$(python -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}|max_new_tokens=${MAX_NEW_TOKENS}|chat_template=true")"
+CACHE_CONFIG_ID="$("${PYTHON_BIN}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}|max_new_tokens=${MAX_NEW_TOKENS}|chat_template=true")"
 ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --main_process_port "${MASTER_PORT}")
 if (( NUM_DEVICES > 1 )); then
   ACCELERATE_ARGS=(--multi_gpu "${ACCELERATE_ARGS[@]}")
@@ -211,29 +221,100 @@ task_selected() {
   [[ ",${TASKS}," == *",$1,"* ]]
 }
 
+if ! task_selected gsm8k; then
+  echo "当前脚本只启用了 GSM8K；请让 TASKS 包含 gsm8k。" >&2
+  exit 2
+fi
+
+# Fail once before spawning eight ranks if the repaired HF assets, installed
+# packages, or the currently enabled task registration are invalid.
+"${PYTHON_BIN}" - "${HF_MODEL_PATH}" "${MASK_TOKEN_ID}" \
+  gsm8k_cot_zeroshot <<'PY'
+import sys
+
+import accelerate
+import transformers
+from packaging.version import Version
+from transformers import AutoConfig, AutoTokenizer
+
+from lm_eval.tasks import TaskManager
+
+
+model_path = sys.argv[1]
+mask_token_id = int(sys.argv[2])
+tasks = sys.argv[3:]
+
+if Version(transformers.__version__) < Version("5.2.0"):
+    raise SystemExit(
+        "[PREFLIGHT] hf-diffusion requires transformers>=5.2.0; "
+        f"found {transformers.__version__}."
+    )
+
+config = AutoConfig.from_pretrained(
+    model_path, local_files_only=True, trust_remote_code=False
+)
+if config.model_type != "qwen3":
+    raise SystemExit(
+        f"[PREFLIGHT] Expected exported model_type='qwen3', got {config.model_type!r}."
+    )
+if not 0 <= mask_token_id < int(config.vocab_size):
+    raise SystemExit(
+        f"[PREFLIGHT] mask_token_id={mask_token_id} is outside "
+        f"vocab_size={config.vocab_size}."
+    )
+AutoTokenizer.from_pretrained(
+    model_path, local_files_only=True, trust_remote_code=False
+)
+
+task_manager = TaskManager()
+missing = [task for task in tasks if task not in task_manager.all_tasks]
+if missing:
+    raise SystemExit(f"[PREFLIGHT] Unregistered lm-eval tasks: {missing}")
+
+print(
+    "[PREFLIGHT] HF config/tokenizer and lm-eval task passed "
+    f"(transformers={transformers.__version__}, accelerate={accelerate.__version__})."
+)
+PY
+
 run_task() {
-  local alias="$1"
-  local task="$2"
+  if (( $# < 3 )); then
+    echo "run_task 至少需要三个参数: <alias> <task> <expected_examples> [fewshot]" >&2
+    return 2
+  fi
+  local task_alias="$1"
+  local task_name="$2"
   local expected_examples="$3"
+  local fewshot="${4:-0}"
+  if (( $# >= 4 )); then
+    shift 4
+  else
+    shift 3
+  fi
+  if ! [[ "${fewshot}" =~ ^[0-9]+$ ]]; then
+    echo "fewshot 必须是非负整数，当前为: ${fewshot}" >&2
+    return 2
+  fi
   local timestamp
   timestamp="$(date +%Y%m%d_%H%M%S)"
   local log_dir="${RUN_OUTPUT}/logs"
-  local log_file="${log_dir}/${alias}_${timestamp}.log"
-  local summary_log="${log_dir}/${alias}_${timestamp}_summary.log"
-  local metrics_run_dir="${METRICS_ROOT}/${alias}_${timestamp}"
-  local cache_prefix="${RESPONSE_CACHE_ROOT}/${RUN_NAME}/${CACHE_CONFIG_ID}/${alias}/responses"
+  local log_file="${log_dir}/${task_alias}_${timestamp}.log"
+  local summary_log="${log_dir}/${task_alias}_${timestamp}_summary.log"
+  local metrics_run_dir="${METRICS_ROOT}/${task_alias}_${timestamp}"
+  local cache_prefix="${RESPONSE_CACHE_ROOT}/${RUN_NAME}/${CACHE_CONFIG_ID}/${task_alias}/responses"
   mkdir -p "${log_dir}" "${metrics_run_dir}" "$(dirname "${cache_prefix}")"
 
   echo "===================================================="
-  echo "论文任务      : ${alias} -> ${task}"
+  echo "论文任务      : ${task_alias} -> ${task_name}"
   echo "完整样本数    : ${expected_examples}"
+  echo "Few-shot      : ${fewshot}"
   echo "Checkpoint    : ${DCP_MODEL_PATH}"
   echo "Block/steps   : ${BLOCK_LENGTH}/${DENOISING_STEPS_PER_BLOCK}"
   echo "起始状态      : response-aligned 全 MASK block"
   echo "重掩码        : low_confidence_static"
   echo "采样          : temperature=1, top-p=1, top-k=1"
   echo "Prompt        : Qwen3 chat template, thinking=false"
-  echo "生成          : zero-shot, 1 completion, max ${MAX_NEW_TOKENS} tokens"
+  echo "生成          : ${fewshot}-shot, 1 completion, max ${MAX_NEW_TOKENS} tokens"
   echo "日志          : ${log_file}"
   echo "===================================================="
 
@@ -242,14 +323,21 @@ run_task() {
   for ((attempt = 1; attempt <= MAX_TASK_ATTEMPTS; attempt++)); do
     local attempt_metrics_dir="${metrics_run_dir}/attempt_${attempt}"
     mkdir -p "${attempt_metrics_dir}"
-    echo "[ATTEMPT ${attempt}/${MAX_TASK_ATTEMPTS}] ${alias}" | tee -a "${log_file}"
+    echo "[ATTEMPT ${attempt}/${MAX_TASK_ATTEMPTS}] ${task_alias}" | tee -a "${log_file}"
+    if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/prepare_sqlite_cache.py" \
+      --cache-prefix "${cache_prefix}" \
+      --quarantine-root "${cache_prefix}_corrupt" \
+      2>&1 | tee -a "${log_file}"; then
+      echo "[ERROR] 无法检查或隔离损坏的响应缓存。" | tee -a "${log_file}"
+      return 1
+    fi
     if HF_DIFFUSION_METRICS_DIR="${attempt_metrics_dir}" \
-      accelerate launch "${ACCELERATE_ARGS[@]}" \
+      "${PYTHON_BIN}" -m accelerate.commands.launch "${ACCELERATE_ARGS[@]}" \
       -m lm_eval \
       --model hf-diffusion \
       --model_args "${MODEL_ARGS}" \
-      --tasks "${task}" \
-      --num_fewshot 0 \
+      --tasks "${task_name}" \
+      --num_fewshot "${fewshot}" \
       --batch_size 1 \
       --apply_chat_template \
       --gen_kwargs "max_gen_toks=${MAX_NEW_TOKENS},temperature=1.0,top_p=1.0,do_sample=True" \
@@ -257,20 +345,20 @@ run_task() {
       --log_samples \
       --use_cache "${cache_prefix}" \
       --cache_requests \
-      --output_path "${RUN_OUTPUT}/${alias}" \
+      --output_path "${RUN_OUTPUT}/${task_alias}" \
       "${LIMIT_ARGS[@]}" \
       "$@" 2>&1 | tee -a "${log_file}"; then
-      python "${SCRIPT_DIR}/scripts/summarize_diffusion_metrics.py" \
+      "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/summarize_diffusion_metrics.py" \
         --metrics-dir "${metrics_run_dir}" \
-        --results-dir "${RUN_OUTPUT}/${alias}" \
+        --results-dir "${RUN_OUTPUT}/${task_alias}" \
         --output "${summary_log}" \
-        --task "${task}" \
+        --task "${task_name}" \
         --model "${HF_MODEL_PATH}" \
         --source-log "${log_file}"
       return 0
     else
       exit_code="${PIPESTATUS[0]}"
-      echo "[ERROR] ${alias} 第 ${attempt} 次运行失败，exit=${exit_code}" | tee -a "${log_file}"
+      echo "[ERROR] ${task_alias} 第 ${attempt} 次运行失败，exit=${exit_code}" | tee -a "${log_file}"
     fi
   done
   return "${exit_code}"
@@ -278,12 +366,12 @@ run_task() {
 
 echo "===== d-OPD 论文附录 C.4 对齐评测 ====="
 # task_selected mmlu && run_task mmlu mmlu_generative 14042
-# task_selected mmlu_pro && run_task mmlu_pro mmlu_pro 12032
+# task_selected mmlu_pro && run_task mmlu_pro leaderboard_mmlu_pro 12032
 # task_selected gpqa_diamond && run_task gpqa_diamond gpqa_diamond_cot_zeroshot 198
 # task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319
 # task_selected math500 && run_task math500 hendrycks_math500 500
 # task_selected aime25 && run_task aime25 aime25 30
-task_selected gsm8k && run_task gsm8k 5
+task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319 5
 
 echo "评测完成: ${RUN_OUTPUT}"
 echo "注意：论文还在 step 50,100,...,450,483 中按六项平均分选同一个最佳 checkpoint。"
