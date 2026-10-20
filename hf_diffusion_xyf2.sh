@@ -145,7 +145,7 @@ MC_NUM="${MC_NUM:-128}"
 MC_BATCH_SIZE="${MC_BATCH_SIZE:-16}"
 SEED="${SEED:-42}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_diffusion_1020}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/f50058111/lm-eval-harness/eval_results_diffusion_1020}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
 # Every completed model response is committed to a rank-local SQLite file.
 # If the long-running inference succeeds but the final HCCL gather fails, the
