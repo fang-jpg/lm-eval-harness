@@ -43,6 +43,15 @@ def _as_optional_int(value: int | str | None) -> int | None:
     return int(value)
 
 
+def _as_bool(value: bool | str) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized not in {"true", "false", "1", "0", "yes", "no"}:
+        raise ValueError(f"Expected a boolean value, got {value!r}.")
+    return normalized in {"true", "1", "yes"}
+
+
 @register_model("hf-diffusion")
 class HFDiffusionLM(HFLM):
     """Evaluate a Hugging Face-compatible masked diffusion language model.
@@ -60,6 +69,8 @@ class HFDiffusionLM(HFLM):
         mask_token_id: int | str | None = None,
         block_length: int | str = 32,
         diffusion_steps: int | str | None = None,
+        denoising_steps_per_block: int | str | None = None,
+        response_aligned_blocks: bool | str = False,
         diffusion_temperature: float | str = 0.0,
         threshold: float | str = 0.0,
         top_k: int | str = 0,
@@ -78,6 +89,10 @@ class HFDiffusionLM(HFLM):
         self._requested_mask_token_id = _as_optional_int(mask_token_id)
         self.block_length = int(block_length)
         self.diffusion_steps = _as_optional_int(diffusion_steps)
+        self.denoising_steps_per_block = _as_optional_int(
+            denoising_steps_per_block
+        )
+        self.response_aligned_blocks = _as_bool(response_aligned_blocks)
         self.diffusion_temperature = float(diffusion_temperature)
         self.threshold = float(threshold)
         self.top_k = int(top_k)
@@ -128,10 +143,13 @@ class HFDiffusionLM(HFLM):
 
         eval_logger.info(
             "Initialized hf-diffusion: mask_token_id=%d, block_length=%d, "
-            "diffusion_steps=%s, threshold=%.4f, mc_num=%d",
+            "diffusion_steps=%s, denoising_steps_per_block=%s, "
+            "response_aligned_blocks=%s, threshold=%.4f, mc_num=%d",
             self.mask_token_id,
             self.block_length,
             self.diffusion_steps,
+            self.denoising_steps_per_block,
+            self.response_aligned_blocks,
             self.threshold,
             self.mc_num,
         )
@@ -149,6 +167,20 @@ class HFDiffusionLM(HFLM):
             raise ValueError("block_length must be positive.")
         if self.diffusion_steps is not None and self.diffusion_steps <= 0:
             raise ValueError("diffusion_steps must be positive when provided.")
+        if (
+            self.denoising_steps_per_block is not None
+            and self.denoising_steps_per_block <= 0
+        ):
+            raise ValueError(
+                "denoising_steps_per_block must be positive when provided."
+            )
+        if (
+            self.diffusion_steps is not None
+            and self.denoising_steps_per_block is not None
+        ):
+            raise ValueError(
+                "Set either diffusion_steps or denoising_steps_per_block, not both."
+            )
         if self.diffusion_temperature < 0:
             raise ValueError("diffusion_temperature must be non-negative.")
         if not 0 <= self.threshold <= 1:
@@ -185,6 +217,28 @@ class HFDiffusionLM(HFLM):
         """
         layer_types = getattr(self.config, "layer_types", None) or ["full_attention"]
         return dict.fromkeys(set(layer_types) | {"full_attention"})
+
+    def _attention_mask_mapping(self, mask: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Route one explicit additive mask to every Qwen3 attention layer."""
+        layer_types = getattr(self.config, "layer_types", None) or ["full_attention"]
+        return {
+            key: mask for key in set(layer_types) | {"full_attention"}
+        }
+
+    def _block_causal_prefix_mask(self, length: int, device: torch.device) -> torch.Tensor:
+        """JetEngine's start-aligned staircase prompt prefill mask."""
+        allowed = torch.zeros((length, length), dtype=torch.bool, device=device)
+        for start in range(0, length, self.block_length):
+            end = min(start + self.block_length, length)
+            allowed[start:end, :end] = True
+        mask = torch.full(
+            (1, 1, length, length),
+            torch.finfo(self.model.dtype).min,
+            dtype=self.model.dtype,
+            device=device,
+        )
+        mask[0, 0][allowed] = 0
+        return mask
 
     def _autocast_context(self):
         return torch.autocast(
@@ -271,6 +325,8 @@ class HFDiffusionLM(HFLM):
                 "settings": {
                     "block_length": self.block_length,
                     "diffusion_steps": self.diffusion_steps,
+                    "denoising_steps_per_block": self.denoising_steps_per_block,
+                    "response_aligned_blocks": self.response_aligned_blocks,
                     "threshold": self.threshold,
                     "diffusion_temperature": self.diffusion_temperature,
                 },
@@ -335,15 +391,21 @@ class HFDiffusionLM(HFLM):
         # token.  Committing it would leave an apparently completed block with
         # unresolved masks.
         logits[..., self.mask_token_id] = -torch.inf
-        if temperature == 0:
-            probabilities = torch.softmax(logits, dim=-1)
-            return probabilities.max(dim=-1)
+        raw_probabilities = torch.softmax(logits, dim=-1)
+        if temperature == 0 or self.top_k == 1:
+            sampled = logits.argmax(dim=-1)
+            confidence = raw_probabilities.gather(
+                -1, sampled.unsqueeze(-1)
+            ).squeeze(-1)
+            return confidence, sampled
 
-        probabilities = torch.softmax(self._filter_logits(logits / temperature), dim=-1)
+        probabilities = torch.softmax(
+            self._filter_logits(logits / temperature), dim=-1
+        )
         sampled = torch.multinomial(
             probabilities.reshape(-1, probabilities.shape[-1]), num_samples=1
         ).reshape(probabilities.shape[:-1])
-        confidence = probabilities.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
+        confidence = raw_probabilities.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
         return confidence, sampled
 
     def _select_updates(
@@ -409,7 +471,7 @@ class HFDiffusionLM(HFLM):
         max_new_tokens: int,
         temperature: float,
     ) -> torch.Tensor:
-        """Generate one unpadded sequence with hybrid block diffusion."""
+        """Generate one unpadded sequence with hybrid or response-aligned blocks."""
         if prompt_ids.shape[0] != 1:
             raise ValueError("_generate_one expects exactly one prompt.")
         if max_new_tokens <= 0:
@@ -418,19 +480,37 @@ class HFDiffusionLM(HFLM):
         model = self.model
         prompt_length = prompt_ids.shape[1]
         num_blocks = math.ceil(max_new_tokens / self.block_length)
-        total_steps = self.diffusion_steps or max_new_tokens
-        steps_per_block = self._allocate_steps(total_steps, num_blocks)
+        per_block_steps = getattr(self, "denoising_steps_per_block", None)
+        if per_block_steps is None:
+            total_steps = self.diffusion_steps or max_new_tokens
+            steps_per_block = self._allocate_steps(total_steps, num_blocks)
+        else:
+            steps_per_block = [per_block_steps] * num_blocks
+        response_aligned_blocks = getattr(
+            self, "response_aligned_blocks", False
+        )
 
         with self._autocast_context():
             self._increment_forward_count("prefill")
+            prompt_positions = torch.arange(
+                prompt_length, device=prompt_ids.device
+            )
+            prompt_mask = self._block_causal_prefix_mask(
+                prompt_length, prompt_ids.device
+            )
             prefill = model(
                 input_ids=prompt_ids,
+                attention_mask=self._attention_mask_mapping(prompt_mask),
+                position_ids=prompt_positions.unsqueeze(0),
+                cache_position=prompt_positions,
                 use_cache=True,
                 return_dict=True,
             )
         past_key_values = prefill.past_key_values
-        _, next_token = self._sample(prefill.logits[:, -1, :], temperature)
-        next_token = next_token[:, None]
+        next_token = None
+        if not response_aligned_blocks:
+            _, next_token = self._sample(prefill.logits[:, -1, :], temperature)
+            next_token = next_token[:, None]
         output_ids = prompt_ids.clone()
         generated = 0
         block_steps = []
@@ -452,7 +532,8 @@ class HFDiffusionLM(HFLM):
                 dtype=prompt_ids.dtype,
                 device=prompt_ids.device,
             )
-            block[:, 0] = next_token[:, 0]
+            if not response_aligned_blocks:
+                block[:, 0] = next_token[:, 0]
             mutable = block.eq(self.mask_token_id)
             initial_count = int(mutable.sum().item())
             cache_length = past_key_values.get_seq_length()
@@ -470,11 +551,16 @@ class HFDiffusionLM(HFLM):
                 if not mutable.any():
                     break
                 denoise_cache = copy.deepcopy(past_key_values)
+                denoise_mask = torch.zeros(
+                    (1, 1, current_length, cache_length + current_length),
+                    dtype=self.model.dtype,
+                    device=prompt_ids.device,
+                )
                 with self._autocast_context():
                     self._increment_forward_count("denoise")
                     denoise = model(
                         input_ids=block,
-                        attention_mask=self._bidirectional_mask(),
+                        attention_mask=self._attention_mask_mapping(denoise_mask),
                         past_key_values=denoise_cache,
                         position_ids=position_ids,
                         cache_position=cache_position,
@@ -510,20 +596,30 @@ class HFDiffusionLM(HFLM):
             output_ids = torch.cat([output_ids, block], dim=1)
             generated += current_length
 
+            eos_end = None
             eos_token_id = self.tokenizer.eos_token_id
             if eos_token_id is not None:
                 eos_positions = torch.nonzero(
                     output_ids[0, prompt_length:].eq(eos_token_id), as_tuple=False
                 ).flatten()
                 if eos_positions.numel() > 0:
-                    end = prompt_length + int(eos_positions[0].item()) + 1
-                    generated_output = output_ids[:, :end]
-                    break
+                    eos_end = prompt_length + int(eos_positions[0].item()) + 1
+            if eos_end is not None and not response_aligned_blocks:
+                generated_output = output_ids[:, :eos_end]
+                break
 
+            # JetEngine schedules every completed block once in SAVING state
+            # to materialize its causal KV cache, including the final/EOS block.
             with self._autocast_context():
                 self._increment_forward_count("causal")
+                saving_mask = torch.zeros(
+                    (1, 1, current_length, cache_length + current_length),
+                    dtype=self.model.dtype,
+                    device=prompt_ids.device,
+                )
                 causal = model(
                     input_ids=block,
+                    attention_mask=self._attention_mask_mapping(saving_mask),
                     past_key_values=past_key_values,
                     position_ids=position_ids,
                     cache_position=cache_position,
@@ -531,9 +627,12 @@ class HFDiffusionLM(HFLM):
                     return_dict=True,
                 )
             past_key_values = causal.past_key_values
-            if block_index + 1 < num_blocks:
+            if not response_aligned_blocks and block_index + 1 < num_blocks:
                 _, next_token = self._sample(causal.logits[:, -1, :], temperature)
                 next_token = next_token[:, None]
+            if eos_end is not None:
+                generated_output = output_ids[:, :eos_end]
+                break
 
         if generated_output is None:
             generated_output = output_ids
