@@ -84,10 +84,12 @@ def _write_summary(
     generated_tokens = 0
     generation_requests = 0
     decode_seconds = 0.0
-    forced_tokens = 0
+    progress_fallback_tokens = 0
     stalled_steps = 0
     total_blocks = 0
     rank_decode_seconds: Counter[int] = Counter()
+    peak_memory_allocated = 0
+    peak_memory_reserved = 0
     settings = []
 
     for payload in metrics:
@@ -97,15 +99,23 @@ def _write_summary(
         payload_decode_seconds = float(payload.get("decode_seconds", 0.0))
         decode_seconds += payload_decode_seconds
         rank_decode_seconds[int(payload.get("rank", 0))] += payload_decode_seconds
+        peak_memory_allocated = max(
+            peak_memory_allocated,
+            int(payload.get("peak_memory_allocated_bytes", 0)),
+        )
+        peak_memory_reserved = max(
+            peak_memory_reserved,
+            int(payload.get("peak_memory_reserved_bytes", 0)),
+        )
         if payload.get("settings") not in settings:
             settings.append(payload.get("settings"))
 
         for request in payload.get("requests", []):
             block_steps = request.get("block_steps", [])
-            block_forced = request.get("block_forced_low_confidence_tokens", [])
+            block_progress = request.get("block_progress_fallback_tokens", [])
             block_stalled = request.get("block_stalled_steps", [])
             total_blocks += len(block_steps)
-            forced_tokens += sum(int(value) for value in block_forced)
+            progress_fallback_tokens += sum(int(value) for value in block_progress)
             stalled_steps += sum(int(value) for value in block_stalled)
             for block_index, value in enumerate(block_steps):
                 steps = int(value)
@@ -113,6 +123,7 @@ def _write_summary(
                 steps_by_block_index[block_index].append(steps)
 
     actual_forward_count = sum(forward_counts.values())
+    decode_forward_count = forward_counts["denoise"] + forward_counts["causal"]
     token_device_second = (
         generated_tokens / decode_seconds if decode_seconds > 0 else 0.0
     )
@@ -158,15 +169,37 @@ def _write_summary(
         for kind in ("prefill", "denoise", "causal", "scoring"):
             output.write(f"{kind}_forward_count={forward_counts[kind]}\n")
         output.write(f"actual_forward_count={actual_forward_count}\n")
+        output.write(f"decode_forward_count={decode_forward_count}\n")
+        output.write(
+            "actual_forwards_per_request="
+            f"{actual_forward_count / generation_requests:.6f}\n"
+            if generation_requests
+            else "actual_forwards_per_request=0.000000\n"
+        )
+        output.write(
+            "decode_forwards_per_request="
+            f"{decode_forward_count / generation_requests:.6f}\n"
+            if generation_requests
+            else "decode_forwards_per_request=0.000000\n"
+        )
         output.write(f"decode_device_seconds={decode_seconds:.9f}\n")
         output.write(f"decode_tok_per_s_device_average={token_device_second:.6f}\n")
         output.write(
             f"decode_tok_per_s_all_ranks_estimate={aggregate_tok_per_s:.6f}\n"
         )
+        gibibyte = 1024**3
+        output.write(
+            "peak_memory_allocated_gb_max_rank="
+            f"{peak_memory_allocated / gibibyte:.6f}\n"
+        )
+        output.write(
+            "peak_memory_reserved_gb_max_rank="
+            f"{peak_memory_reserved / gibibyte:.6f}\n"
+        )
 
         output.write("\n[block_step_summary]\n")
         output.write(f"total_blocks={total_blocks}\n")
-        output.write(f"forced_low_confidence_tokens={forced_tokens}\n")
+        output.write(f"progress_fallback_tokens={progress_fallback_tokens}\n")
         output.write(f"stalled_threshold_steps={stalled_steps}\n")
         if observed_step_count:
             output.write(f"steps_min={min(step_histogram)}\n")
@@ -199,7 +232,7 @@ def _write_summary(
                     "metrics_file={file} rank={rank} request={request_index} "
                     "generated_tokens={tokens} decode_seconds={seconds:.9f} "
                     "block_steps={steps} allocated_steps={allocated} "
-                    "forced_low_confidence_tokens={forced} "
+                    "progress_fallback_tokens={progress} "
                     "stalled_steps={stalled}\n".format(
                         file=relative_file.as_posix(),
                         rank=rank,
@@ -210,12 +243,96 @@ def _write_summary(
                         allocated=json.dumps(
                             request.get("block_allocated_steps", [])
                         ),
-                        forced=json.dumps(
-                            request.get("block_forced_low_confidence_tokens", [])
+                        progress=json.dumps(
+                            request.get("block_progress_fallback_tokens", [])
                         ),
                         stalled=json.dumps(request.get("block_stalled_steps", [])),
                     )
                 )
+
+        output.write("\n[block_decode_probability_traces]\n")
+        trace_count = 0
+        for metric_file, payload in zip(metric_files, metrics):
+            relative_file = metric_file.relative_to(metrics_root)
+            rank = int(payload.get("rank", 0))
+            for request in payload.get("requests", []):
+                request_index = request.get("request_index", 0)
+                for trace in request.get("block_traces", []):
+                    trace_count += 1
+                    output.write(
+                        "trace metrics_file={file} rank={rank} request={request} "
+                        "block={block} response_start={start} "
+                        "allocated_steps={allocated} actual_steps={actual}\n".format(
+                            file=relative_file.as_posix(),
+                            rank=rank,
+                            request=request_index,
+                            block=trace.get("block_index", 0),
+                            start=trace.get("response_start", 0),
+                            allocated=trace.get("allocated_steps", 0),
+                            actual=trace.get("actual_steps", 0),
+                        )
+                    )
+                    seed = trace.get("seed_token", {})
+                    output.write(
+                        "  seed position={position} response_position={response} "
+                        "token_id={token_id} token={token} probability={probability}\n".format(
+                            position=seed.get("block_position", 0),
+                            response=seed.get("response_position", 0),
+                            token_id=seed.get("token_id"),
+                            token=json.dumps(
+                                seed.get("token_text"), ensure_ascii=False
+                            ),
+                            probability=seed.get("confidence"),
+                        )
+                    )
+                    for step in trace.get("steps", []):
+                        output.write(
+                            "  step={step} remaining_before={remaining} "
+                            "accepted_by_threshold={accepted} "
+                            "progress_fallback_tokens={progress}\n".format(
+                                step=step.get("step"),
+                                remaining=step.get("remaining_before"),
+                                accepted=step.get("accepted_by_threshold"),
+                                progress=step.get("progress_fallback_tokens"),
+                            )
+                        )
+                        for token in step.get("token_probabilities", []):
+                            output.write(
+                                "    position={position} response_position={response} "
+                                "proposed_id={token_id} token={token_text} "
+                                "probability={probability} above_threshold={above} "
+                                "accepted={accepted} "
+                                "accepted_for_progress={progress}\n".format(
+                                    position=token.get("block_position"),
+                                    response=token.get("response_position"),
+                                    token_id=token.get("proposed_token_id"),
+                                    token_text=json.dumps(
+                                        token.get("proposed_token_text"),
+                                        ensure_ascii=False,
+                                    ),
+                                    probability=token.get("probability"),
+                                    above=token.get("above_threshold"),
+                                    accepted=token.get("accepted"),
+                                    progress=token.get("accepted_for_progress"),
+                                )
+                            )
+                    final_tokens = trace.get("final_tokens", [])
+                    output.write(
+                        "  final_token_ids="
+                        + json.dumps(
+                            [token.get("token_id") for token in final_tokens]
+                        )
+                        + "\n"
+                    )
+                    output.write(
+                        "  final_token_text="
+                        + json.dumps(
+                            [token.get("token_text") for token in final_tokens],
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+        output.write(f"trace_block_count={trace_count}\n")
 
     temporary_path.replace(output_path)
 

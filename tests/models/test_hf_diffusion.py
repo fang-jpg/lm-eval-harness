@@ -56,6 +56,10 @@ def _make_lm(model, *, mc_num=8, mc_batch_size=4):
     lm.mc_num = mc_num
     lm.mc_batch_size = mc_batch_size
     lm.check_greedy = True
+    lm.threshold_mode = "scheduled"
+    lm.max_denoising_steps_per_block = None
+    lm.trace_requests_per_rank = 0
+    lm.trace_blocks_per_request = 0
     lm.mixed_precision_dtype = None
     lm._rank = 0
     lm.cache_hook = _CacheHook()
@@ -69,13 +73,35 @@ def test_allocate_steps_distributes_remainder_to_early_blocks():
         HFDiffusionLM._allocate_steps(2, 3)
 
 
+def test_strict_threshold_requires_enough_steps_for_one_token_progress():
+    lm = HFDiffusionLM.__new__(HFDiffusionLM)
+    lm.block_length = 8
+    lm.diffusion_steps = None
+    lm.diffusion_temperature = 0.0
+    lm.threshold = 0.8
+    lm.threshold_mode = "strict"
+    lm.max_denoising_steps_per_block = 6
+    lm.trace_requests_per_rank = 0
+    lm.trace_blocks_per_request = 0
+    lm.top_k = 0
+    lm.top_p = 1.0
+    lm.mc_num = 1
+    lm.mc_batch_size = 1
+
+    with pytest.raises(ValueError, match="block_length - 1"):
+        lm._validate_diffusion_args()
+
+    lm.max_denoising_steps_per_block = 7
+    lm._validate_diffusion_args()
+
+
 def test_threshold_accepts_only_confident_tokens_before_final_step():
     lm = HFDiffusionLM.__new__(HFDiffusionLM)
     lm.threshold = 0.8
     confidence = torch.tensor([[0.91, 0.79, 0.80]])
     mutable = torch.tensor([[True, True, True]])
 
-    updates, accepted_count, forced_count = lm._select_updates(
+    updates, accepted_count, progress_count = lm._select_updates(
         confidence,
         mutable,
         initial_count=3,
@@ -85,7 +111,7 @@ def test_threshold_accepts_only_confident_tokens_before_final_step():
 
     assert updates.tolist() == [[True, False, True]]
     assert accepted_count == 2
-    assert forced_count == 0
+    assert progress_count == 0
 
 
 def test_threshold_supplements_highest_confidence_to_meet_quota():
@@ -94,7 +120,7 @@ def test_threshold_supplements_highest_confidence_to_meet_quota():
     confidence = torch.tensor([[0.91, 0.79, 0.70, 0.60]])
     mutable = torch.tensor([[True, True, True, True]])
 
-    updates, accepted_count, forced_count = lm._select_updates(
+    updates, accepted_count, progress_count = lm._select_updates(
         confidence,
         mutable,
         initial_count=4,
@@ -103,8 +129,8 @@ def test_threshold_supplements_highest_confidence_to_meet_quota():
     )
 
     assert updates.tolist() == [[True, True, False, False]]
-    assert accepted_count == 2
-    assert forced_count == 0
+    assert accepted_count == 1
+    assert progress_count == 1
 
 
 def test_threshold_makes_progress_when_no_token_reaches_threshold():
@@ -113,7 +139,7 @@ def test_threshold_makes_progress_when_no_token_reaches_threshold():
     confidence = torch.tensor([[0.70, 0.79, 0.60]])
     mutable = torch.tensor([[True, True, True]])
 
-    updates, accepted_count, forced_count = lm._select_updates(
+    updates, accepted_count, progress_count = lm._select_updates(
         confidence,
         mutable,
         initial_count=3,
@@ -122,17 +148,17 @@ def test_threshold_makes_progress_when_no_token_reaches_threshold():
     )
 
     assert updates.tolist() == [[False, True, False]]
-    assert accepted_count == 1
-    assert forced_count == 0
+    assert accepted_count == 0
+    assert progress_count == 1
 
 
-def test_threshold_final_step_meets_quota_without_forced_tokens():
+def test_scheduled_threshold_final_step_reports_progress_tokens():
     lm = HFDiffusionLM.__new__(HFDiffusionLM)
     lm.threshold = 0.8
     confidence = torch.tensor([[0.91, 0.79, 0.80]])
     mutable = torch.tensor([[True, True, True]])
 
-    updates, accepted_count, forced_count = lm._select_updates(
+    updates, accepted_count, progress_count = lm._select_updates(
         confidence,
         mutable,
         initial_count=3,
@@ -141,8 +167,48 @@ def test_threshold_final_step_meets_quota_without_forced_tokens():
     )
 
     assert updates.tolist() == [[True, True, True]]
-    assert accepted_count == 3
-    assert forced_count == 0
+    assert accepted_count == 2
+    assert progress_count == 1
+
+
+def test_strict_threshold_does_not_supplement_below_threshold_tokens():
+    lm = HFDiffusionLM.__new__(HFDiffusionLM)
+    lm.threshold = 0.8
+    lm.threshold_mode = "strict"
+    confidence = torch.tensor([[0.91, 0.79, 0.80, 0.60]])
+    mutable = torch.tensor([[True, True, True, True]])
+
+    updates, accepted_count, progress_count = lm._select_updates(
+        confidence,
+        mutable,
+        initial_count=4,
+        step_index=0,
+        num_steps=2,
+    )
+
+    assert updates.tolist() == [[True, False, True, False]]
+    assert accepted_count == 2
+    assert progress_count == 0
+
+
+def test_strict_threshold_accepts_one_best_token_when_none_reaches_threshold():
+    lm = HFDiffusionLM.__new__(HFDiffusionLM)
+    lm.threshold = 0.8
+    lm.threshold_mode = "strict"
+    confidence = torch.tensor([[0.70, 0.79, 0.60]])
+    mutable = torch.tensor([[True, True, True]])
+
+    updates, accepted_count, progress_count = lm._select_updates(
+        confidence,
+        mutable,
+        initial_count=3,
+        step_index=0,
+        num_steps=3,
+    )
+
+    assert updates.tolist() == [[False, True, False]]
+    assert accepted_count == 0
+    assert progress_count == 1
 
 
 def test_single_token_choices_reuse_context_forward():
@@ -211,9 +277,9 @@ def test_tiny_qwen3_records_threshold_generation_metrics():
     }
     assert lm._perf_metrics["requests"][0]["block_steps"] == [1, 1]
     assert lm._perf_metrics["requests"][0][
-        "block_forced_low_confidence_tokens"
-    ] == [0, 0]
-    assert lm._perf_metrics["requests"][0]["block_stalled_steps"] == [0, 0]
+        "block_progress_fallback_tokens"
+    ] == [1, 1]
+    assert lm._perf_metrics["requests"][0]["block_stalled_steps"] == [1, 1]
     # The restored 2026-10-12 hybrid path is causal for prompt prefill and
     # completed-block cache writes; only denoising receives a bidirectional map.
     assert [mask is None for mask in model.recorded_attention_masks] == [
@@ -223,6 +289,58 @@ def test_tiny_qwen3_records_threshold_generation_metrics():
         False,
         True,
     ]
+
+
+def test_strict_threshold_makes_one_token_progress_with_trace():
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=64,
+        attention_dropout=0.0,
+        pad_token_id=0,
+        eos_token_id=None,
+    )
+    config._attn_implementation = "eager"
+    model = _RecordingQwen3(config).eval()
+    lm = _make_lm(model)
+    lm.tokenizer = SimpleNamespace(eos_token_id=None, pad_token_id=0)
+    lm.block_length = 3
+    lm.diffusion_steps = None
+    lm.diffusion_temperature = 0.0
+    lm.threshold = 1.0
+    lm.threshold_mode = "strict"
+    lm.max_denoising_steps_per_block = 2
+    lm.trace_requests_per_rank = 1
+    lm.trace_blocks_per_request = 1
+    lm.top_k = 0
+    lm.top_p = 1.0
+    lm._metrics_dir = "enabled-for-test"
+    lm._perf_metrics = lm._new_perf_metrics()
+
+    prompt = torch.tensor([[1, 4, 5]])
+    output = lm._generate_one(prompt, max_new_tokens=6, temperature=0.0)
+
+    assert output.shape == (1, 9)
+    assert not output[:, prompt.shape[1] :].eq(lm.mask_token_id).any()
+    request = lm._perf_metrics["requests"][0]
+    assert request["block_steps"] == [2, 2]
+    assert request["block_progress_fallback_tokens"] == [2, 2]
+    assert request["block_stalled_steps"] == [2, 2]
+    assert len(request["block_traces"]) == 1
+    trace = request["block_traces"][0]
+    assert trace["actual_steps"] == 2
+    for step in trace["steps"]:
+        accepted_for_progress = [
+            token
+            for token in step["token_probabilities"]
+            if token["accepted_for_progress"]
+        ]
+        assert len(accepted_for_progress) == 1
 
 
 def test_constructor_forces_eager_attention_on_loaded_checkpoint(tmp_path):

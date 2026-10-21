@@ -29,6 +29,8 @@ def test_diffusion_summary_combines_accuracy_forwards_and_block_steps(tmp_path):
         "generation_requests": 1,
         "raw_generated_tokens": 4,
         "decode_seconds": 2.0,
+        "peak_memory_allocated_bytes": 3 * 1024**3,
+        "peak_memory_reserved_bytes": 4 * 1024**3,
         "requests": [
             {
                 "request_index": 0,
@@ -36,8 +38,51 @@ def test_diffusion_summary_combines_accuracy_forwards_and_block_steps(tmp_path):
                 "decode_seconds": 2.0,
                 "block_steps": [3],
                 "block_allocated_steps": [3],
-                "block_forced_low_confidence_tokens": [1],
+                "block_progress_fallback_tokens": [1],
                 "block_stalled_steps": [1],
+                "block_traces": [
+                    {
+                        "block_index": 0,
+                        "response_start": 0,
+                        "allocated_steps": 3,
+                        "actual_steps": 2,
+                        "seed_token": {
+                            "block_position": 0,
+                            "response_position": 0,
+                            "token_id": 10,
+                            "token_text": "A",
+                            "confidence": 0.9,
+                        },
+                        "steps": [
+                            {
+                                "step": 1,
+                                "remaining_before": 3,
+                                "accepted_by_threshold": 1,
+                                "progress_fallback_tokens": 0,
+                                "token_probabilities": [
+                                    {
+                                        "block_position": 1,
+                                        "response_position": 1,
+                                        "proposed_token_id": 11,
+                                        "proposed_token_text": "B",
+                                        "probability": 0.85,
+                                        "above_threshold": True,
+                                        "accepted": True,
+                                        "accepted_for_progress": False,
+                                    }
+                                ],
+                            }
+                        ],
+                        "final_tokens": [
+                            {
+                                "block_position": 0,
+                                "response_position": 0,
+                                "token_id": 10,
+                                "token_text": "A",
+                            }
+                        ],
+                    }
+                ],
             }
         ],
     }
@@ -65,7 +110,12 @@ def test_diffusion_summary_combines_accuracy_forwards_and_block_steps(tmp_path):
     summary = output_path.read_text(encoding="utf-8")
     assert "results.boolq-seq2seq.exact_match=0.75" in summary
     assert "actual_forward_count=5" in summary
+    assert "actual_forwards_per_request=5.000000" in summary
     assert "decode_tok_per_s_device_average=2.000000" in summary
+    assert "peak_memory_allocated_gb_max_rank=3.000000" in summary
     assert "steps_histogram=3:1" in summary
     assert "block_steps=[3]" in summary
-    assert "forced_low_confidence_tokens=[1]" in summary
+    assert "progress_fallback_tokens=[1]" in summary
+    assert "[block_decode_probability_traces]" in summary
+    assert "probability=0.85" in summary
+    assert "trace_block_count=1" in summary

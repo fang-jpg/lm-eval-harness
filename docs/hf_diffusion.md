@@ -102,6 +102,22 @@ The shared runner supports these environment overrides:
   guarantees progress on every denoising step and prevents a stalled block from
   forcing all remaining masks at the end. `hf_diffusion_xyf2.sh` defaults this
   to `0`, which preserves the 2026-10-12 scheduled hybrid decoder.
+- `THRESHOLD_MODE`: `scheduled` (the default) preserves the fixed denoising
+  quota above. `strict` commits every token whose raw softmax probability is
+  at least `THRESHOLD`. If no position reaches the threshold, it commits only
+  the single highest-confidence proposal so the next forward sees updated
+  block context. The first token of each block remains the unconditional AR
+  seed required by the restored 2026-10-12 hybrid decoder; the threshold
+  governs the remaining masked positions.
+- `MAX_DENOISING_STEPS_PER_BLOCK`: required in `strict` mode and used as a
+  finite safety limit. It must be at least `BLOCK_LENGTH - 1`, because every
+  strict step commits at least one of the non-seed positions. There is no
+  final-step force-all. Leave `DIFFUSION_STEPS` empty in this mode.
+- `TRACE_REQUESTS_PER_RANK` and `TRACE_BLOCKS_PER_REQUEST`: bound the optional
+  token-probability trace written to the summary log. The trace shows every
+  still-masked position's proposed token, raw probability, threshold decision,
+  one-token progress fallback, and the completed block. Both default to `0`
+  so full evaluations do not create very large logs.
 - `DIFFUSION_TEMPERATURE`, `TOP_K`, `TOP_P`: sampling controls. A task's
   `do_sample: false` generation setting takes precedence and keeps the suite
   deterministic.
@@ -126,10 +142,26 @@ The shared runner supports these environment overrides:
 For every successfully completed task, `hf_diffusion_xyf2.sh` creates a
 `*_summary.log` beside the ordinary task log. It combines the lm-eval accuracy
 metrics with actual prefill, denoise, causal and scoring forward counts;
-decode-only tokens/second; aggregate block-step statistics; and one compact
-per-request list containing the actual step count for every generated block.
+decode-only tokens/second; maximum per-rank allocated/reserved device memory;
+aggregate block-step statistics; one compact per-request list containing the
+actual step count for every generated block; and any requested bounded token
+probability traces.
 Rank-local machine-readable JSON is retained below `METRICS_ROOT`, which
 defaults to `<run output>/metrics`.
+
+For example, strict threshold decoding with a short trace can be launched as:
+
+```bash
+TASKS=gsm8k \
+BLOCK_LENGTH=8 \
+DIFFUSION_STEPS= \
+THRESHOLD_MODE=strict \
+THRESHOLD=0.8 \
+MAX_DENOISING_STEPS_PER_BLOCK=8 \
+TRACE_REQUESTS_PER_RANK=1 \
+TRACE_BLOCKS_PER_REQUEST=2 \
+bash hf_diffusion_xyf2.sh
+```
 
 ### CANN environment discovery
 

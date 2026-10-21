@@ -62,6 +62,10 @@ class HFDiffusionLM(HFLM):
         diffusion_steps: int | str | None = None,
         diffusion_temperature: float | str = 0.0,
         threshold: float | str = 0.0,
+        threshold_mode: str = "scheduled",
+        max_denoising_steps_per_block: int | str | None = None,
+        trace_requests_per_rank: int | str = 0,
+        trace_blocks_per_request: int | str = 0,
         top_k: int | str = 0,
         top_p: float | str = 1.0,
         mc_num: int | str = 128,
@@ -80,6 +84,12 @@ class HFDiffusionLM(HFLM):
         self.diffusion_steps = _as_optional_int(diffusion_steps)
         self.diffusion_temperature = float(diffusion_temperature)
         self.threshold = float(threshold)
+        self.threshold_mode = str(threshold_mode).strip().lower()
+        self.max_denoising_steps_per_block = _as_optional_int(
+            max_denoising_steps_per_block
+        )
+        self.trace_requests_per_rank = int(trace_requests_per_rank)
+        self.trace_blocks_per_request = int(trace_blocks_per_request)
         self.top_k = int(top_k)
         self.top_p = float(top_p)
         self.mc_num = int(mc_num)
@@ -124,15 +134,19 @@ class HFDiffusionLM(HFLM):
         self._validate_mask_token()
 
         if self._metrics_dir:
+            self._reset_peak_memory_stats()
             atexit.register(self._write_perf_metrics)
 
         eval_logger.info(
             "Initialized hf-diffusion: mask_token_id=%d, block_length=%d, "
-            "diffusion_steps=%s, threshold=%.4f, mc_num=%d",
+            "diffusion_steps=%s, threshold=%.4f, threshold_mode=%s, "
+            "max_denoising_steps_per_block=%s, mc_num=%d",
             self.mask_token_id,
             self.block_length,
             self.diffusion_steps,
             self.threshold,
+            self.threshold_mode,
+            self.max_denoising_steps_per_block,
             self.mc_num,
         )
 
@@ -153,6 +167,39 @@ class HFDiffusionLM(HFLM):
             raise ValueError("diffusion_temperature must be non-negative.")
         if not 0 <= self.threshold <= 1:
             raise ValueError("threshold must be in [0, 1].")
+        if self.threshold_mode not in {"scheduled", "strict"}:
+            raise ValueError("threshold_mode must be 'scheduled' or 'strict'.")
+        if self.max_denoising_steps_per_block is not None:
+            if self.max_denoising_steps_per_block <= 0:
+                raise ValueError(
+                    "max_denoising_steps_per_block must be positive."
+                )
+            if self.threshold_mode != "strict":
+                raise ValueError(
+                    "max_denoising_steps_per_block is only valid when "
+                    "threshold_mode=strict."
+                )
+            if self.diffusion_steps is not None:
+                raise ValueError(
+                    "Set max_denoising_steps_per_block or diffusion_steps, not both."
+                )
+        if self.threshold_mode == "strict":
+            if self.threshold <= 0:
+                raise ValueError("strict threshold mode requires threshold > 0.")
+            if self.max_denoising_steps_per_block is None:
+                raise ValueError(
+                    "strict threshold mode requires "
+                    "max_denoising_steps_per_block as a finite safety limit."
+                )
+            minimum_steps = self.block_length - 1
+            if self.max_denoising_steps_per_block < minimum_steps:
+                raise ValueError(
+                    "strict threshold mode requires "
+                    "max_denoising_steps_per_block >= block_length - 1 "
+                    f"({minimum_steps}) so one-token progress can finish a block."
+                )
+        if self.trace_requests_per_rank < 0 or self.trace_blocks_per_request < 0:
+            raise ValueError("trace request/block limits must be non-negative.")
         if self.top_k < 0:
             raise ValueError("top_k must be non-negative.")
         if not 0 < self.top_p <= 1:
@@ -195,7 +242,7 @@ class HFDiffusionLM(HFLM):
 
     def _new_perf_metrics(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 3,
             "forward_counts": {
                 "prefill": 0,
                 "denoise": 0,
@@ -207,6 +254,33 @@ class HFDiffusionLM(HFLM):
             "decode_seconds": 0.0,
             "requests": [],
         }
+
+    def _reset_peak_memory_stats(self) -> None:
+        try:
+            device_type = self.device.type
+            if device_type == "npu" and hasattr(torch, "npu"):
+                torch.npu.reset_peak_memory_stats(self.device)
+            elif device_type == "cuda" and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats(self.device)
+        except Exception as error:
+            eval_logger.warning("Could not reset peak device-memory stats: %s", error)
+
+    def _peak_memory_stats(self) -> tuple[int, int]:
+        try:
+            device_type = self.device.type
+            if device_type == "npu" and hasattr(torch, "npu"):
+                return (
+                    int(torch.npu.max_memory_allocated(self.device)),
+                    int(torch.npu.max_memory_reserved(self.device)),
+                )
+            if device_type == "cuda" and torch.cuda.is_available():
+                return (
+                    int(torch.cuda.max_memory_allocated(self.device)),
+                    int(torch.cuda.max_memory_reserved(self.device)),
+                )
+        except Exception as error:
+            eval_logger.warning("Could not read peak device-memory stats: %s", error)
+        return 0, 0
 
     def _increment_forward_count(self, kind: str) -> None:
         metrics = getattr(self, "_perf_metrics", None)
@@ -232,8 +306,9 @@ class HFDiffusionLM(HFLM):
         decode_seconds: float,
         block_steps: list[int],
         block_allocated_steps: list[int],
-        block_forced_tokens: list[int],
+        block_progress_fallback_tokens: list[int],
         block_stalled_steps: list[int],
+        block_traces: list[dict[str, Any]],
     ) -> None:
         metrics = getattr(self, "_perf_metrics", None)
         if metrics is None or not getattr(self, "_metrics_dir", None):
@@ -249,8 +324,9 @@ class HFDiffusionLM(HFLM):
                 "decode_seconds": decode_seconds,
                 "block_steps": block_steps,
                 "block_allocated_steps": block_allocated_steps,
-                "block_forced_low_confidence_tokens": block_forced_tokens,
+                "block_progress_fallback_tokens": block_progress_fallback_tokens,
                 "block_stalled_steps": block_stalled_steps,
+                "block_traces": block_traces,
             }
         )
 
@@ -264,14 +340,24 @@ class HFDiffusionLM(HFLM):
             output_dir = Path(metrics_dir).resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             rank = int(self.rank)
+            self._metrics_synchronize()
+            peak_allocated, peak_reserved = self._peak_memory_stats()
             payload = {
                 **metrics,
                 "rank": rank,
                 "world_size": int(self.world_size),
+                "peak_memory_allocated_bytes": peak_allocated,
+                "peak_memory_reserved_bytes": peak_reserved,
                 "settings": {
                     "block_length": self.block_length,
                     "diffusion_steps": self.diffusion_steps,
                     "threshold": self.threshold,
+                    "threshold_mode": self.threshold_mode,
+                    "max_denoising_steps_per_block": (
+                        self.max_denoising_steps_per_block
+                    ),
+                    "trace_requests_per_rank": self.trace_requests_per_rank,
+                    "trace_blocks_per_request": self.trace_blocks_per_request,
                     "diffusion_temperature": self.diffusion_temperature,
                 },
             }
@@ -352,6 +438,20 @@ class HFDiffusionLM(HFLM):
         confidence = raw_probabilities.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
         return confidence, sampled
 
+    def _trace_token_text(self, token_id: int) -> str | None:
+        decode = getattr(self.tokenizer, "decode", None)
+        if decode is None:
+            return None
+        try:
+            return decode(
+                [token_id],
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+        except Exception as error:
+            eval_logger.debug("Could not decode traced token %d: %s", token_id, error)
+            return None
+
     def _select_updates(
         self,
         confidence: torch.Tensor,
@@ -368,6 +468,21 @@ class HFDiffusionLM(HFLM):
         if self.threshold > 0:
             above_threshold = candidate_confidence >= self.threshold
             selected = candidates[above_threshold]
+            accepted_count = int(selected.numel())
+
+            if getattr(self, "threshold_mode", "scheduled") == "strict":
+                progress_fallback_count = 0
+                if selected.numel() == 0:
+                    # With deterministic decoding, an unchanged all-MASK input
+                    # produces the same logits on the next forward. Commit only
+                    # the single most confident proposal so the next step sees
+                    # new context, without a final-step force-all cliff.
+                    best_index = torch.argmax(candidate_confidence)
+                    selected = candidates[best_index].reshape(1)
+                    progress_fallback_count = 1
+                updates = torch.zeros_like(mutable)
+                updates[0, selected] = True
+                return updates, accepted_count, progress_fallback_count
 
             # Thresholding is allowed to reveal more tokens than the scheduled
             # decoder, but never fewer than its cumulative quota.  Without this
@@ -391,10 +506,12 @@ class HFDiffusionLM(HFLM):
                     torch.topk(remaining_confidence, k=needed, largest=True).indices
                 ]
                 selected = torch.cat([selected, supplemental])
+            else:
+                needed = 0
 
             updates = torch.zeros_like(mutable)
             updates[0, selected] = True
-            return updates, int(selected.numel()), 0
+            return updates, accepted_count, needed
 
         already_committed = initial_count - int(candidates.numel())
         target_committed = math.ceil(initial_count * (step_index + 1) / num_steps)
@@ -429,8 +546,14 @@ class HFDiffusionLM(HFLM):
         model = self.model
         prompt_length = prompt_ids.shape[1]
         num_blocks = math.ceil(max_new_tokens / self.block_length)
-        total_steps = self.diffusion_steps or max_new_tokens
-        steps_per_block = self._allocate_steps(total_steps, num_blocks)
+        threshold_mode = getattr(self, "threshold_mode", "scheduled")
+        if threshold_mode == "strict":
+            maximum = self.max_denoising_steps_per_block
+            assert maximum is not None
+            steps_per_block = [maximum] * num_blocks
+        else:
+            total_steps = self.diffusion_steps or max_new_tokens
+            steps_per_block = self._allocate_steps(total_steps, num_blocks)
 
         with self._autocast_context():
             self._increment_forward_count("prefill")
@@ -440,15 +563,24 @@ class HFDiffusionLM(HFLM):
                 return_dict=True,
             )
         past_key_values = prefill.past_key_values
-        _, next_token = self._sample(prefill.logits[:, -1, :], temperature)
+        next_token_confidence, next_token = self._sample(
+            prefill.logits[:, -1, :], temperature
+        )
         next_token = next_token[:, None]
         output_ids = prompt_ids.clone()
         generated = 0
         block_steps = []
         block_allocated_steps = []
-        block_forced_tokens = []
+        block_progress_fallback_tokens = []
         block_stalled_steps = []
+        block_traces = []
         generated_output = None
+        metrics = getattr(self, "_perf_metrics", None)
+        request_index = metrics["generation_requests"] if metrics is not None else 0
+        trace_request = bool(
+            getattr(self, "_metrics_dir", None)
+            and request_index < getattr(self, "trace_requests_per_rank", 0)
+        )
 
         # Decode throughput excludes prefill and includes all block denoising,
         # sampling, cache-update forwards and the associated host work.
@@ -474,12 +606,34 @@ class HFDiffusionLM(HFLM):
             ).unsqueeze(0)
             cache_position = position_ids[0]
             actual_steps = 0
-            forced_tokens = 0
+            progress_fallback_tokens = 0
             stalled_steps = 0
+            trace_block = trace_request and block_index < getattr(
+                self, "trace_blocks_per_request", 0
+            )
+            block_trace = None
+            if trace_block:
+                seed_id = int(block[0, 0].item())
+                block_trace = {
+                    "block_index": block_index,
+                    "response_start": generated,
+                    "allocated_steps": steps_per_block[block_index],
+                    "seed_token": {
+                        "block_position": 0,
+                        "response_position": generated,
+                        "token_id": seed_id,
+                        "token_text": self._trace_token_text(seed_id),
+                        "confidence": round(
+                            float(next_token_confidence[0].item()), 8
+                        ),
+                    },
+                    "steps": [],
+                }
 
             for step_index in range(steps_per_block[block_index]):
                 if not mutable.any():
                     break
+                mutable_before = mutable.clone()
                 denoise_cache = copy.deepcopy(past_key_values)
                 with self._autocast_context():
                     self._increment_forward_count("denoise")
@@ -494,29 +648,88 @@ class HFDiffusionLM(HFLM):
                     )
                 confidence, proposed = self._sample(denoise.logits, temperature)
                 confidence = confidence.masked_fill(~mutable, -torch.inf)
-                updates, accepted_count, step_forced_tokens = self._select_updates(
+                updates, accepted_count, step_progress_tokens = self._select_updates(
                     confidence,
                     mutable,
                     initial_count,
                     step_index,
                     steps_per_block[block_index],
                 )
+                progress_updates = torch.zeros_like(updates)
+                if step_progress_tokens:
+                    progress_updates = (
+                        updates & mutable_before & confidence.lt(self.threshold)
+                    )
+
+                if block_trace is not None:
+                    token_probabilities = []
+                    candidates = torch.nonzero(
+                        mutable_before[0], as_tuple=False
+                    ).flatten()
+                    for position_tensor in candidates:
+                        position = int(position_tensor.item())
+                        token_id = int(proposed[0, position].item())
+                        probability = float(confidence[0, position].item())
+                        token_probabilities.append(
+                            {
+                                "block_position": position,
+                                "response_position": generated + position,
+                                "proposed_token_id": token_id,
+                                "proposed_token_text": self._trace_token_text(
+                                    token_id
+                                ),
+                                "probability": round(probability, 8),
+                                "above_threshold": (
+                                    probability >= self.threshold
+                                    if self.threshold > 0
+                                    else None
+                                ),
+                                "accepted": bool(updates[0, position].item()),
+                                "accepted_for_progress": bool(
+                                    progress_updates[0, position].item()
+                                ),
+                            }
+                        )
+                    block_trace["steps"].append(
+                        {
+                            "step": step_index + 1,
+                            "remaining_before": int(mutable_before.sum().item()),
+                            "accepted_by_threshold": accepted_count,
+                            "progress_fallback_tokens": step_progress_tokens,
+                            "token_probabilities": token_probabilities,
+                        }
+                    )
                 block[updates] = proposed[updates]
                 mutable &= ~updates
                 actual_steps += 1
-                forced_tokens += step_forced_tokens
+                progress_fallback_tokens += step_progress_tokens
                 stalled_steps += accepted_count == 0
 
             block_steps.append(actual_steps)
             block_allocated_steps.append(steps_per_block[block_index])
-            block_forced_tokens.append(forced_tokens)
+            block_progress_fallback_tokens.append(progress_fallback_tokens)
             block_stalled_steps.append(stalled_steps)
 
             if mutable.any():
                 raise RuntimeError(
                     f"Diffusion block {block_index} still contains mask tokens after "
-                    f"{steps_per_block[block_index]} steps."
+                    f"{steps_per_block[block_index]} steps. Strict mode must allocate "
+                    "at least block_length - 1 steps."
                 )
+
+            if block_trace is not None:
+                final_ids = [int(token_id) for token_id in block[0].tolist()]
+                block_trace["actual_steps"] = actual_steps
+                block_trace["final_tokens"] = [
+                    {
+                        "block_position": position,
+                        "response_position": generated + position,
+                        "token_id": token_id,
+                        "token_text": self._trace_token_text(token_id),
+                    }
+                    for position, token_id in enumerate(final_ids)
+                ]
+                block_traces.append(block_trace)
 
             output_ids = torch.cat([output_ids, block], dim=1)
             generated += current_length
@@ -547,7 +760,9 @@ class HFDiffusionLM(HFLM):
                 )
             past_key_values = causal.past_key_values
             if block_index + 1 < num_blocks:
-                _, next_token = self._sample(causal.logits[:, -1, :], temperature)
+                next_token_confidence, next_token = self._sample(
+                    causal.logits[:, -1, :], temperature
+                )
                 next_token = next_token[:, None]
 
         if generated_output is None:
@@ -560,8 +775,9 @@ class HFDiffusionLM(HFLM):
             decode_seconds=decode_seconds,
             block_steps=block_steps,
             block_allocated_steps=block_allocated_steps,
-            block_forced_tokens=block_forced_tokens,
+            block_progress_fallback_tokens=block_progress_fallback_tokens,
             block_stalled_steps=block_stalled_steps,
+            block_traces=block_traces,
         )
         return generated_output
 

@@ -138,6 +138,15 @@ DIFFUSION_TEMPERATURE="${DIFFUSION_TEMPERATURE:-0.0}"
 # token above the threshold, then supplements with the highest-confidence
 # remaining tokens as needed to satisfy the current scheduled quota.
 THRESHOLD="${THRESHOLD:-0.0}"
+# scheduled: keep the fixed quota used by the 2026-10-12 evaluator.
+# strict: accept every token that reaches THRESHOLD. If none does, accept only
+# the most confident token so the next forward sees updated block context.
+THRESHOLD_MODE="${THRESHOLD_MODE:-scheduled}"
+MAX_DENOISING_STEPS_PER_BLOCK="${MAX_DENOISING_STEPS_PER_BLOCK:-}"
+# Probability traces are intentionally bounded because a full GSM8K trace is
+# very large. These limits apply independently on every rank.
+TRACE_REQUESTS_PER_RANK="${TRACE_REQUESTS_PER_RANK:-0}"
+TRACE_BLOCKS_PER_REQUEST="${TRACE_BLOCKS_PER_REQUEST:-0}"
 TOP_K="${TOP_K:-0}"
 TOP_P="${TOP_P:-1.0}"
 MC_NUM="${MC_NUM:-128}"
@@ -152,7 +161,7 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
 # Bump this whenever decoding semantics change so an otherwise identical run
 # cannot reuse responses produced by an older decoder implementation.
-DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-causal-20261012-v3}"
+DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-threshold-progress-v5}"
 # Total attempts, including the first one.  A retry only computes responses
 # still missing from each rank-local cache, so an extra attempt is inexpensive
 # and covers a slow rank that needs more than one timeout window to catch up.
@@ -198,10 +207,40 @@ if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "MAX_TASK_ATTEMPTS must be a positive integer, got: ${MAX_TASK_ATTEMPTS}" >&2
   exit 2
 fi
+if ! [[ "${BLOCK_LENGTH}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BLOCK_LENGTH must be a positive integer, got: ${BLOCK_LENGTH}" >&2
+  exit 2
+fi
+if [[ "${THRESHOLD_MODE}" != "scheduled" && "${THRESHOLD_MODE}" != "strict" ]]; then
+  echo "THRESHOLD_MODE must be scheduled or strict: ${THRESHOLD_MODE}" >&2
+  exit 2
+fi
+if ! [[ "${TRACE_REQUESTS_PER_RANK}" =~ ^[0-9]+$ && "${TRACE_BLOCKS_PER_REQUEST}" =~ ^[0-9]+$ ]]; then
+  echo "TRACE_REQUESTS_PER_RANK and TRACE_BLOCKS_PER_REQUEST must be non-negative integers." >&2
+  exit 2
+fi
+if [[ "${THRESHOLD_MODE}" == "strict" ]]; then
+  if [[ -n "${DIFFUSION_STEPS}" ]]; then
+    echo "Strict threshold mode uses MAX_DENOISING_STEPS_PER_BLOCK; leave DIFFUSION_STEPS empty." >&2
+    exit 2
+  fi
+  if ! [[ "${MAX_DENOISING_STEPS_PER_BLOCK}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Strict threshold mode requires a positive MAX_DENOISING_STEPS_PER_BLOCK." >&2
+    exit 2
+  fi
+  MIN_STRICT_STEPS=$((BLOCK_LENGTH - 1))
+  if (( MAX_DENOISING_STEPS_PER_BLOCK < MIN_STRICT_STEPS )); then
+    echo "Strict threshold mode requires MAX_DENOISING_STEPS_PER_BLOCK >= BLOCK_LENGTH - 1 (${MIN_STRICT_STEPS})." >&2
+    exit 2
+  fi
+fi
 
-MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},threshold=${THRESHOLD},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
+MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},threshold=${THRESHOLD},threshold_mode=${THRESHOLD_MODE},trace_requests_per_rank=${TRACE_REQUESTS_PER_RANK},trace_blocks_per_request=${TRACE_BLOCKS_PER_REQUEST},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
 if [[ -n "${DIFFUSION_STEPS}" ]]; then
   MODEL_ARGS+=",diffusion_steps=${DIFFUSION_STEPS}"
+fi
+if [[ -n "${MAX_DENOISING_STEPS_PER_BLOCK}" ]]; then
+  MODEL_ARGS+=",max_denoising_steps_per_block=${MAX_DENOISING_STEPS_PER_BLOCK}"
 fi
 if [[ -n "${MASK_TOKEN_ID}" ]]; then
   MODEL_ARGS+=",mask_token_id=${MASK_TOKEN_ID}"
@@ -261,6 +300,9 @@ run_task() {
   echo "Block size : ${BLOCK_LENGTH}"
   echo "Diff steps : ${DIFFUSION_STEPS:-auto}"
   echo "Threshold  : ${THRESHOLD}"
+  echo "Thresh mode: ${THRESHOLD_MODE}"
+  echo "Max steps/B: ${MAX_DENOISING_STEPS_PER_BLOCK:-n/a}"
+  echo "Trace      : ${TRACE_REQUESTS_PER_RANK} request(s)/rank, ${TRACE_BLOCKS_PER_REQUEST} block(s)/request"
   echo "Log file   : ${log_file}"
   echo "Summary log: ${summary_log}"
   echo "Metrics dir: ${metrics_run_dir}"
