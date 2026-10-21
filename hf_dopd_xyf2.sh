@@ -9,7 +9,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-DOPD_EVAL_SCRIPT_VERSION="dopd-eval-gsm8k-5shot-v3"
+DOPD_EVAL_SCRIPT_VERSION="standalone-hf-dopd-gsm8k-5shot-v1"
 echo "[d-OPD] Evaluation script version: ${DOPD_EVAL_SCRIPT_VERSION}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -76,7 +76,7 @@ echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
 echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
 echo "910B kernel index=${KERNEL_INDEX}"
 
-# Verify the same Cast operation used by the diffusion attention-mask path
+# Verify the same Cast operation used by the d-OPD attention-mask path
 # before checkpoint conversion and eight-rank model loading begin.
 "${PYTHON_BIN}" - <<'PY'
 import torch
@@ -127,8 +127,6 @@ TASKS="${TASKS:-mmlu,mmlu_pro,gpqa_diamond,gsm8k,math500,aime25}"
 LIMIT="${LIMIT:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_dopd_paper_c4}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
-MC_NUM="${MC_NUM:-128}"
-MC_BATCH_SIZE="${MC_BATCH_SIZE:-16}"
 SEED="${SEED:-42}"
 MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
 
@@ -138,7 +136,6 @@ BLOCK_LENGTH=4
 DENOISING_STEPS_PER_BLOCK=4
 MASK_TOKEN_ID=151669
 DIFFUSION_TEMPERATURE=1.0
-THRESHOLD=0.0
 TOP_K=1
 TOP_P=1.0
 MAX_NEW_TOKENS=4096
@@ -184,22 +181,18 @@ RUN_NAME="$(basename "${DCP_MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
-DECODER_CACHE_VERSION="dopd-paper-c4-block-cache-v2"
+DECODER_CACHE_VERSION="standalone-hf-dopd-paper-c4-v1"
 mkdir -p "${RUN_OUTPUT}"
 
 if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "MAX_TASK_ATTEMPTS 必须是正整数，当前为: ${MAX_TASK_ATTEMPTS}" >&2
   exit 2
 fi
-if ! [[ "${MC_NUM}" =~ ^[1-9][0-9]*$ && "${MC_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "MC_NUM 和 MC_BATCH_SIZE 必须是正整数。" >&2
-  exit 2
-fi
 if [[ -n "${LIMIT}" ]]; then
   echo "[警告] LIMIT=${LIMIT} 仅用于冒烟测试，不可与论文结果比较。"
 fi
 
-MODEL_ARGS="pretrained=${HF_MODEL_PATH},tokenizer=${HF_MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},denoising_steps_per_block=${DENOISING_STEPS_PER_BLOCK},response_aligned_blocks=true,diffusion_temperature=${DIFFUSION_TEMPERATURE},threshold=${THRESHOLD},top_k=${TOP_K},top_p=${TOP_P},mask_token_id=${MASK_TOKEN_ID},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED},enable_thinking=false"
+MODEL_ARGS="pretrained=${HF_MODEL_PATH},tokenizer=${HF_MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},denoising_steps_per_block=${DENOISING_STEPS_PER_BLOCK},diffusion_temperature=${DIFFUSION_TEMPERATURE},top_k=${TOP_K},top_p=${TOP_P},mask_token_id=${MASK_TOKEN_ID},seed=${SEED},enable_thinking=false"
 if [[ -z "${MODEL_DEVICE}" && "${NUM_DEVICES}" == "1" ]]; then
   MODEL_DEVICE="npu:0"
 fi
@@ -246,7 +239,7 @@ tasks = sys.argv[3:]
 
 if Version(transformers.__version__) < Version("5.2.0"):
     raise SystemExit(
-        "[PREFLIGHT] hf-diffusion requires transformers>=5.2.0; "
+        "[PREFLIGHT] hf-dopd requires transformers>=5.2.0; "
         f"found {transformers.__version__}."
     )
 
@@ -331,10 +324,10 @@ run_task() {
       echo "[ERROR] 无法检查或隔离损坏的响应缓存。" | tee -a "${log_file}"
       return 1
     fi
-    if HF_DIFFUSION_METRICS_DIR="${attempt_metrics_dir}" \
+    if HF_DOPD_METRICS_DIR="${attempt_metrics_dir}" \
       "${PYTHON_BIN}" -m accelerate.commands.launch "${ACCELERATE_ARGS[@]}" \
       -m lm_eval \
-      --model hf-diffusion \
+      --model hf-dopd \
       --model_args "${MODEL_ARGS}" \
       --tasks "${task_name}" \
       --num_fewshot "${fewshot}" \
@@ -348,7 +341,7 @@ run_task() {
       --output_path "${RUN_OUTPUT}/${task_alias}" \
       "${LIMIT_ARGS[@]}" \
       "$@" 2>&1 | tee -a "${log_file}"; then
-      "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/summarize_diffusion_metrics.py" \
+      "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/summarize_dopd_metrics.py" \
         --metrics-dir "${metrics_run_dir}" \
         --results-dir "${RUN_OUTPUT}/${task_alias}" \
         --output "${summary_log}" \

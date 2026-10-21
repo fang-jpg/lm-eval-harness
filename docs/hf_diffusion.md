@@ -5,6 +5,10 @@ diffusion checkpoint with `lm-evaluation-harness`. It is designed for
 decoder-only checkpoints that can already be loaded by the ordinary `hf`
 backend, including the Qwen3 diffusion checkpoint exported by MindSpeed-LLM.
 
+The d-OPD evaluator is deliberately separate. `hf_dopd_xyf2.sh` uses the
+independent `hf-dopd` backend in `lm_eval/models/hf_dopd.py`; it does not route
+response-aligned d-OPD generation through this hybrid decoder.
+
 The backend has two evaluation paths:
 
 - `generate_until` uses causal prompt/KV-cache processing between blocks and
@@ -97,7 +101,7 @@ The shared runner supports these environment overrides:
   remaining tokens when needed to satisfy the current scheduled quota. This
   guarantees progress on every denoising step and prevents a stalled block from
   forcing all remaining masks at the end. `hf_diffusion_xyf2.sh` defaults this
-  to `0.8`.
+  to `0`, which preserves the 2026-10-12 scheduled hybrid decoder.
 - `DIFFUSION_TEMPERATURE`, `TOP_K`, `TOP_P`: sampling controls. A task's
   `do_sample: false` generation setting takes precedence and keeps the suite
   deterministic.
@@ -108,8 +112,8 @@ The shared runner supports these environment overrides:
   `hf-diffusion`.
 - `OUTPUT_ROOT`: result root for a direct runner invocation.
 - `DECODER_CACHE_VERSION`: response-cache namespace for decoder semantics. The
-  runner defaults to the current threshold/quota implementation so responses
-  produced by the old final-step forcing behavior are not reused.
+  runner uses a hybrid-causal namespace so d-OPD responses and responses from
+  the former mixed decoder cannot be reused.
 - `COMPARISON_OUTPUT_ROOT`: root for the three-way comparison. Results are
   separated into `ar_baseline`, `cpt_diffusion_ar/ar`, and
   `cpt_diffusion_ar/diffusion`.
