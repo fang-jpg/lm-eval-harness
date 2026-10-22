@@ -11,7 +11,7 @@ cd "${SCRIPT_DIR}"
 
 # Verified CANN 9.1 toolkit and 910B operator package on this server.  Assign
 # these explicitly so stale CANN 8.5 variables in the parent shell cannot win.
-export CANN_ROOT="/mnt/pipeline-data/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
+export CANN_ROOT="/share/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
 export CANN_ENV="${CANN_ROOT}/set_env.sh"
 export CANN_OPP_PATH="${CANN_ROOT}/opp"
 
@@ -105,7 +105,7 @@ echo "910B kernel index=${KERNEL_INDEX}"
 # 2. HuggingFace offline cache
 # ==============================
 
-export HF_HOME="${HF_HOME:-/mnt/pipeline-data/f50058111/huggingface_cache}"
+export HF_HOME="${HF_HOME:-/share/f50058111/huggingface_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 
@@ -128,7 +128,7 @@ export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
 
-MODEL_PATH="${MODEL_PATH:-/mnt/pipeline-data/f50058111/model_train/ckpt/models/global_step_102500/}"
+MODEL_PATH="${MODEL_PATH:-/share/f50058111/model_train/ckpt/phase4_cpt_ar_duffision_0916/models/global_step_102500/}"
 TASKS="${TASKS:-mmlu,gsm8k,humaneval,boolq,bbh}"
 BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}"
@@ -153,7 +153,7 @@ MC_NUM="${MC_NUM:-128}"
 MC_BATCH_SIZE="${MC_BATCH_SIZE:-16}"
 SEED="${SEED:-42}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/home/f50058111/lm-eval-harness/eval_results_diffusion_1020}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_diffusion_b8_thre0.8}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
 # Every completed model response is committed to a rank-local SQLite file.
 # If the long-running inference succeeds but the final HCCL gather fails, the

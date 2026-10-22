@@ -9,11 +9,11 @@ set -eo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-DOPD_EVAL_SCRIPT_VERSION="standalone-hf-dopd-gsm8k-5shot-v1"
+DOPD_EVAL_SCRIPT_VERSION="standalone-hf-dopd-gsm8k-5shot-greedy-v2"
 echo "[d-OPD] Evaluation script version: ${DOPD_EVAL_SCRIPT_VERSION}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-export CANN_ROOT="/mnt/pipeline-data/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
+export CANN_ROOT="/share/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
 export CANN_ENV="${CANN_ROOT}/set_env.sh"
 export CANN_OPP_PATH="${CANN_ROOT}/opp"
 
@@ -102,12 +102,12 @@ PY
 
 MINDSPEED_ROOT="${MINDSPEED_ROOT:-${SCRIPT_DIR}/../MindSpeed-LLM}"
 
-DCP_MODEL_PATH="${DCP_MODEL_PATH:-/mnt/pipeline-data/f50058111/model_train/opd/qwen3_1.7b_dopd_paper_1node_8card_1019/checkpoints/global_step_100}"
+DCP_MODEL_PATH="${DCP_MODEL_PATH:-/share/f50058111/model_train/dopd/qwen3_1.7b_dopd_paper_1node_8card_1019/checkpoints/global_step_150}"
 HF_MODEL_PATH="${HF_MODEL_PATH:-${DCP_MODEL_PATH%/}/hf_ckpt}"
 DOPD_CONFIG="${DOPD_CONFIG:-$(dirname "$(dirname "${DCP_MODEL_PATH%/}")")/dopd_config.json}"
-BASE_MODEL_PATH="${BASE_MODEL_PATH:-}"
+BASE_MODEL_PATH="${BASE_MODEL_PATH:-/share/f50058111/model_weights/Qwen3-1.7B/Qwen3-1.7B}"
 
-export HF_HOME="${HF_HOME:-/mnt/pipeline-data/f50058111/huggingface_cache}"
+export HF_HOME="${HF_HOME:-/share/f50058111/huggingface_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
@@ -125,7 +125,7 @@ export MASTER_PORT="${MASTER_PORT:-29503}"
 # User-facing task aliases. These six are exactly the paper benchmark set.
 TASKS="${TASKS:-mmlu,mmlu_pro,gpqa_diamond,gsm8k,math500,aime25}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_dopd_paper_c4}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_dopd_1022_150}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
 SEED="${SEED:-42}"
 MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
@@ -135,7 +135,7 @@ MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
 BLOCK_LENGTH=4
 DENOISING_STEPS_PER_BLOCK=4
 MASK_TOKEN_ID=151669
-DIFFUSION_TEMPERATURE=1.0
+DIFFUSION_TEMPERATURE=0.0
 TOP_K=1
 TOP_P=1.0
 MAX_NEW_TOKENS=4096
@@ -181,7 +181,7 @@ RUN_NAME="$(basename "${DCP_MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
-DECODER_CACHE_VERSION="standalone-hf-dopd-paper-c4-v1"
+DECODER_CACHE_VERSION="standalone-hf-dopd-gsm8k-5shot-greedy-v2"
 mkdir -p "${RUN_OUTPUT}"
 
 if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -222,7 +222,7 @@ fi
 # Fail once before spawning eight ranks if the repaired HF assets, installed
 # packages, or the currently enabled task registration are invalid.
 "${PYTHON_BIN}" - "${HF_MODEL_PATH}" "${MASK_TOKEN_ID}" \
-  gsm8k_cot_zeroshot <<'PY'
+  gsm8k_cot <<'PY'
 import sys
 
 import accelerate
@@ -305,7 +305,7 @@ run_task() {
   echo "Block/steps   : ${BLOCK_LENGTH}/${DENOISING_STEPS_PER_BLOCK}"
   echo "起始状态      : response-aligned 全 MASK block"
   echo "重掩码        : low_confidence_static"
-  echo "采样          : temperature=1, top-p=1, top-k=1"
+  echo "采样          : temperature=${DIFFUSION_TEMPERATURE}, top-p=${TOP_P}, top-k=${TOP_K},do_sample=false"
   echo "Prompt        : Qwen3 chat template, thinking=false"
   echo "生成          : ${fewshot}-shot, 1 completion, max ${MAX_NEW_TOKENS} tokens"
   echo "日志          : ${log_file}"
@@ -333,7 +333,7 @@ run_task() {
       --num_fewshot "${fewshot}" \
       --batch_size 1 \
       --apply_chat_template \
-      --gen_kwargs "max_gen_toks=${MAX_NEW_TOKENS},temperature=1.0,top_p=1.0,do_sample=True" \
+      --gen_kwargs "max_gen_toks=${MAX_NEW_TOKENS},temperature=${DIFFUSION_TEMPERATURE},top_p=${TOP_P},do_sample=False" \
       --verbosity INFO \
       --log_samples \
       --use_cache "${cache_prefix}" \
@@ -364,7 +364,8 @@ echo "===== d-OPD 论文附录 C.4 对齐评测 ====="
 # task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319
 # task_selected math500 && run_task math500 hendrycks_math500 500
 # task_selected aime25 && run_task aime25 aime25 30
-task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319 5
+# task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319 5
+task_selected gsm8k && run_task gsm8k gsm8k_cot 1319 5
 
 echo "评测完成: ${RUN_OUTPUT}"
 echo "注意：论文还在 step 50,100,...,450,483 中按六项平均分选同一个最佳 checkpoint。"
