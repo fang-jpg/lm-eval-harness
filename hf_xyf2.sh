@@ -1,4 +1,9 @@
 #!/bin/bash
+set -eo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
 # 统一代理与基础环境
 export GIT_SSL_NO_VERIFY=true
 export https_proxy=http://80.253.89.234:8080
@@ -38,6 +43,7 @@ export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 #export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-14,15}"
 #export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3}"
 NUM_GPUS=$(echo "$ASCEND_RT_VISIBLE_DEVICES" | awk -F',' '{print NF}')
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 # HCCL 默认 60000-60015；多任务同机并行必须换端口段（MASTER_PORT 管不了 HCCL）
 export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60100-60199}"
@@ -83,6 +89,26 @@ ACCELERATE_PORT_ARGS=(--main_process_port "${MASTER_PORT}")
 MODEL_PATH="${MODEL_PATH:-/data2/model_train/ckpt/phase4_cpt_ar_diffusion_0916/models/global_step_10500}"
 # MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/Qwen3-1.7B-Base/}"
 
+# 当前脚本只执行一项普通 AR 生成评测；可通过环境变量覆盖。
+TASK="${TASK:-gsm8k}"
+NUM_FEWSHOT="${NUM_FEWSHOT:-5}"
+LIMIT="${LIMIT:-}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/eval_results_baseline}"
+RUN_OUTPUT="${OUTPUT_ROOT}/${TASK}"
+LOG_DIR="${OUTPUT_ROOT}/logs"
+METRICS_ROOT="${OUTPUT_ROOT}/metrics"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+METRICS_DIR="${METRICS_ROOT}/${TASK}_${TIMESTAMP}"
+LOG_FILE="${LOG_DIR}/${TASK}_${TIMESTAMP}.log"
+SUMMARY_LOG="${LOG_DIR}/${TASK}_${TIMESTAMP}_summary.log"
+mkdir -p "${RUN_OUTPUT}" "${LOG_DIR}" "${METRICS_DIR}"
+
+MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True"
+LIMIT_ARGS=()
+if [[ -n "${LIMIT}" ]]; then
+  LIMIT_ARGS=(--limit "${LIMIT}")
+fi
+
 # ---------------------------------------------------------------------------
 # 本地 cache 状态（docker: lm_eval_zss, ~/.cache/huggingface/）
 #   ✅ openai/gsm8k              -> hub/datasets--openai--gsm8k
@@ -116,15 +142,44 @@ MODEL_PATH="${MODEL_PATH:-/data2/model_train/ckpt/phase4_cpt_ar_diffusion_0916/m
 # ==============================================
 # 第▒~@▒~D▒~ZGSM8K ▒~D▒~K (0-shot▒~L▒~O~B▒~@~C hf_nlc.sh)
 # ==============================================
-accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
-   -m lm_eval --model hf \
-   --model_args pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True \
-   --tasks gsm8k \
-   --num_fewshot 5 \
-   --batch_size 1 \
-   --verbosity DEBUG \
-   --log_samples \
-   --output_path ./eval_results_baseline/gsm8k
+echo "===================================================="
+echo "AR evaluation with performance metrics"
+echo "Task       : ${TASK}"
+echo "Model      : ${MODEL_PATH}"
+echo "Fewshot    : ${NUM_FEWSHOT}"
+echo "Devices    : ${ASCEND_RT_VISIBLE_DEVICES}"
+echo "Results    : ${RUN_OUTPUT}"
+echo "Metrics    : ${METRICS_DIR}"
+echo "Log        : ${LOG_FILE}"
+echo "Summary    : ${SUMMARY_LOG}"
+echo "Start time : $(date '+%F %T')"
+echo "===================================================="
+
+if HF_AR_METRICS_DIR="${METRICS_DIR}" \
+  accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
+    -m lm_eval --model hf-ar-metrics \
+    --model_args "${MODEL_ARGS}" \
+    --tasks "${TASK}" \
+    --num_fewshot "${NUM_FEWSHOT}" \
+    --batch_size 1 \
+    --verbosity DEBUG \
+    --log_samples \
+    --output_path "${RUN_OUTPUT}" \
+    "${LIMIT_ARGS[@]}" \
+    2>&1 | tee "${LOG_FILE}"; then
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/summarize_ar_metrics.py" \
+    --metrics-dir "${METRICS_DIR}" \
+    --results-dir "${RUN_OUTPUT}" \
+    --output "${SUMMARY_LOG}" \
+    --task "${TASK}" \
+    --model "${MODEL_PATH}" \
+    --source-log "${LOG_FILE}"
+  echo "[SUMMARY] Accuracy and AR performance: ${SUMMARY_LOG}" | tee -a "${LOG_FILE}"
+else
+  EXIT_CODE="${PIPESTATUS[0]}"
+  echo "[ERROR] AR evaluation failed, exit code=${EXIT_CODE}" | tee -a "${LOG_FILE}"
+  exit "${EXIT_CODE}"
+fi
 
 
 # ==============================================

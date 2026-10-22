@@ -30,6 +30,7 @@ MODEL_MAPPING = {
     "ggml": "lm_eval.models.gguf:GGUFLM",
     "gguf": "lm_eval.models.gguf:GGUFLM",
     "hf": "lm_eval.models.huggingface:HFLM",
+    "hf-ar-metrics": "lm_eval.models.hf_ar_metrics:HFARMetricsLM",
     "hf-audiolm-qwen": "lm_eval.models.hf_audiolm:HFAudioLM",
     "hf-auto": "lm_eval.models.huggingface:HFLM",
     "hf-diffusion": "lm_eval.models.hf_diffusion:HFDiffusionLM",
