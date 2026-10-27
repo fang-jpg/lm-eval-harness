@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 
-# d-OPD paper Appendix C.4 evaluation for one 8-card Ascend node.
-# Decoder semantics are intentionally fixed; only paths, device/runtime knobs,
-# selected tasks, and LIMIT (for a non-comparable smoke test) are configurable.
+# d-OPD GSM8K 5-shot comparison for one 8-card Ascend node.
+# The task, prompt construction, generation budget, sampling mode, and metric
+# are aligned with hf_diffusion_xyf2.sh. The d-OPD block schedule remains its
+# model-specific setting.
 
 set -eo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-DOPD_EVAL_SCRIPT_VERSION="standalone-hf-dopd-gsm8k-5shot-greedy-v2"
+DOPD_EVAL_SCRIPT_VERSION="standalone-hf-dopd-gsm8k-5shot-hfdiffusion-parity-v3"
 echo "[d-OPD] Evaluation script version: ${DOPD_EVAL_SCRIPT_VERSION}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -122,23 +123,25 @@ export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
 
-# User-facing task aliases. These six are exactly the paper benchmark set.
-TASKS="${TASKS:-mmlu,mmlu_pro,gpqa_diamond,gsm8k,math500,aime25}"
+# Keep the active comparison surface identical to hf_diffusion_xyf2.sh's
+# currently enabled GSM8K run.
+TASKS="${TASKS:-gsm8k}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_dopd_1022_150}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_dopd_gsm8k_5shot_parity}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
 SEED="${SEED:-42}"
 MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
 
-# Appendix C.4 constants. Do not turn these into ordinary overrides: a run
-# with different values is an ablation and must not be labelled paper-aligned.
+# d-OPD keeps its trained block schedule. Sampling follows the hf-diffusion
+# comparison run: deterministic argmax with top-p 1 and no top-k filtering.
 BLOCK_LENGTH=4
 DENOISING_STEPS_PER_BLOCK=4
 MASK_TOKEN_ID=151669
 DIFFUSION_TEMPERATURE=0.0
-TOP_K=1
+TOP_K=0
 TOP_P=1.0
-MAX_NEW_TOKENS=4096
+# hf_diffusion_xyf2.sh leaves max_gen_toks at lm-eval's default of 256.
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
 
 if [[ ! -d "${DCP_MODEL_PATH}" || ! -f "${DCP_MODEL_PATH}/.metadata" ]]; then
   echo "无效的 d-OPD DCP checkpoint: ${DCP_MODEL_PATH}" >&2
@@ -181,7 +184,7 @@ RUN_NAME="$(basename "${DCP_MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
-DECODER_CACHE_VERSION="standalone-hf-dopd-gsm8k-5shot-greedy-v2"
+DECODER_CACHE_VERSION="standalone-hf-dopd-gsm8k-5shot-hfdiffusion-parity-v3"
 mkdir -p "${RUN_OUTPUT}"
 
 if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -189,10 +192,10 @@ if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 if [[ -n "${LIMIT}" ]]; then
-  echo "[警告] LIMIT=${LIMIT} 仅用于冒烟测试，不可与论文结果比较。"
+  echo "[警告] LIMIT=${LIMIT} 仅用于冒烟测试，不可与完整 1,319 题结果比较。"
 fi
 
-MODEL_ARGS="pretrained=${HF_MODEL_PATH},tokenizer=${HF_MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},denoising_steps_per_block=${DENOISING_STEPS_PER_BLOCK},diffusion_temperature=${DIFFUSION_TEMPERATURE},top_k=${TOP_K},top_p=${TOP_P},mask_token_id=${MASK_TOKEN_ID},seed=${SEED},enable_thinking=false"
+MODEL_ARGS="pretrained=${HF_MODEL_PATH},tokenizer=${HF_MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},denoising_steps_per_block=${DENOISING_STEPS_PER_BLOCK},diffusion_temperature=${DIFFUSION_TEMPERATURE},top_k=${TOP_K},top_p=${TOP_P},mask_token_id=${MASK_TOKEN_ID},seed=${SEED}"
 if [[ -z "${MODEL_DEVICE}" && "${NUM_DEVICES}" == "1" ]]; then
   MODEL_DEVICE="npu:0"
 fi
@@ -200,8 +203,8 @@ if [[ -n "${MODEL_DEVICE}" ]]; then
   MODEL_ARGS+=",device=${MODEL_DEVICE}"
 fi
 
-CACHE_CONFIG_ID="$("${PYTHON_BIN}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}|max_new_tokens=${MAX_NEW_TOKENS}|chat_template=true")"
-ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --main_process_port "${MASTER_PORT}")
+CACHE_CONFIG_ID="$("${PYTHON_BIN}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}|max_new_tokens=${MAX_NEW_TOKENS}|task=gsm8k|fewshot=5|chat_template=false")"
+ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --num_machines 1 --mixed_precision no --dynamo_backend no --main_process_port "${MASTER_PORT}")
 if (( NUM_DEVICES > 1 )); then
   ACCELERATE_ARGS=(--multi_gpu "${ACCELERATE_ARGS[@]}")
 fi
@@ -222,7 +225,7 @@ fi
 # Fail once before spawning eight ranks if the repaired HF assets, installed
 # packages, or the currently enabled task registration are invalid.
 "${PYTHON_BIN}" - "${HF_MODEL_PATH}" "${MASK_TOKEN_ID}" \
-  gsm8k_cot <<'PY'
+  gsm8k <<'PY'
 import sys
 
 import accelerate
@@ -298,7 +301,7 @@ run_task() {
   mkdir -p "${log_dir}" "${metrics_run_dir}" "$(dirname "${cache_prefix}")"
 
   echo "===================================================="
-  echo "论文任务      : ${task_alias} -> ${task_name}"
+  echo "对比任务      : ${task_alias} -> ${task_name}"
   echo "完整样本数    : ${expected_examples}"
   echo "Few-shot      : ${fewshot}"
   echo "Checkpoint    : ${DCP_MODEL_PATH}"
@@ -306,7 +309,7 @@ run_task() {
   echo "起始状态      : response-aligned 全 MASK block"
   echo "重掩码        : low_confidence_static"
   echo "采样          : temperature=${DIFFUSION_TEMPERATURE}, top-p=${TOP_P}, top-k=${TOP_K},do_sample=false"
-  echo "Prompt        : Qwen3 chat template, thinking=false"
+  echo "Prompt        : 与 hf_diffusion_xyf2.sh 相同的原始 gsm8k 模板（不套 chat template）"
   echo "生成          : ${fewshot}-shot, 1 completion, max ${MAX_NEW_TOKENS} tokens"
   echo "日志          : ${log_file}"
   echo "===================================================="
@@ -332,7 +335,6 @@ run_task() {
       --tasks "${task_name}" \
       --num_fewshot "${fewshot}" \
       --batch_size 1 \
-      --apply_chat_template \
       --gen_kwargs "max_gen_toks=${MAX_NEW_TOKENS},temperature=${DIFFUSION_TEMPERATURE},top_p=${TOP_P},do_sample=False" \
       --verbosity INFO \
       --log_samples \
@@ -357,15 +359,7 @@ run_task() {
   return "${exit_code}"
 }
 
-echo "===== d-OPD 论文附录 C.4 对齐评测 ====="
-# task_selected mmlu && run_task mmlu mmlu_generative 14042
-# task_selected mmlu_pro && run_task mmlu_pro leaderboard_mmlu_pro 12032
-# task_selected gpqa_diamond && run_task gpqa_diamond gpqa_diamond_cot_zeroshot 198
-# task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319
-# task_selected math500 && run_task math500 hendrycks_math500 500
-# task_selected aime25 && run_task aime25 aime25 30
-# task_selected gsm8k && run_task gsm8k gsm8k_cot_zeroshot 1319 5
-task_selected gsm8k && run_task gsm8k gsm8k_cot 1319 5
+echo "===== d-OPD GSM8K 5-shot（与 hf_diffusion_xyf2.sh 对齐） ====="
+task_selected gsm8k && run_task gsm8k gsm8k 1319 5
 
 echo "评测完成: ${RUN_OUTPUT}"
-echo "注意：论文还在 step 50,100,...,450,483 中按六项平均分选同一个最佳 checkpoint。"

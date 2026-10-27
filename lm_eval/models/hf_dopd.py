@@ -9,7 +9,6 @@ full-visible SAVING forward for every completed response block.
 from __future__ import annotations
 
 import atexit
-import copy
 import json
 import logging
 import os
@@ -32,6 +31,17 @@ def _as_optional_int(value: int | str | None) -> int | None:
     if value is None or value == "" or str(value).lower() == "none":
         return None
     return int(value)
+
+
+def _crop_cache(cache: Any, length: int) -> None:
+    """Restore the persistent prefix after a speculative denoising forward."""
+    if hasattr(cache, "crop"):
+        cache.crop(length)
+        return
+    for layer_index in range(len(cache.key_cache)):
+        cache.key_cache[layer_index] = cache.key_cache[layer_index][:, :, :length]
+        cache.value_cache[layer_index] = cache.value_cache[layer_index][:, :, :length]
+    cache._seen_tokens = length
 
 
 @register_model("hf-dopd")
@@ -392,7 +402,6 @@ class HFDOPDLM(HFLM):
             for quota in schedule:
                 if not mutable.any():
                     break
-                denoise_cache = copy.deepcopy(past_key_values)
                 with self._autocast_context():
                     self._increment_forward_count("denoise")
                     denoise = model(
@@ -402,12 +411,14 @@ class HFDOPDLM(HFLM):
                             cache_length + current_length,
                             prompt_ids.device,
                         ),
-                        past_key_values=denoise_cache,
+                        past_key_values=past_key_values,
                         position_ids=position_ids,
                         cache_position=cache_position,
                         use_cache=True,
                         return_dict=True,
                     )
+                past_key_values = denoise.past_key_values
+                _crop_cache(past_key_values, cache_length)
                 confidence, proposed = self._sample(denoise.logits, temperature)
                 confidence = confidence.masked_fill(~mutable, -torch.inf)
                 updates = self._select_updates(confidence, mutable, quota)
