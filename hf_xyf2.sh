@@ -4,6 +4,133 @@ set -eo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+
+# ============================================================
+# 1. Explicitly initialize CANN 9.1 for Ascend 910B
+# ============================================================
+
+export CANN_ROOT="/share/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
+export CANN_ENV="${CANN_ROOT}/set_env.sh"
+export CANN_OPP_PATH="${CANN_ROOT}/opp"
+export PYTHON_BIN="${PYTHON_BIN:-python}"
+
+if [[ ! -f "${CANN_ENV}" ]]; then
+    echo "[ERROR] CANN set_env.sh not found: ${CANN_ENV}" >&2
+    exit 2
+fi
+
+if [[ ! -d "${CANN_OPP_PATH}" ]]; then
+    echo "[ERROR] CANN OPP directory not found: ${CANN_OPP_PATH}" >&2
+    exit 2
+fi
+
+# Avoid mixing old CANN toolkit libraries with CANN 9.1.
+# Retain non-CANN library paths and Ascend driver libraries.
+clean_cann_path() {
+    local value="${1:-}"
+    local entry
+    local result=""
+    local -a entries=()
+
+    IFS=':' read -r -a entries <<< "${value}"
+
+    for entry in "${entries[@]}"; do
+        [[ -z "${entry}" ]] && continue
+
+        case "${entry}" in
+            *Ascend910B_CANN_*|*Ascend910C_CANN_*|\
+            */ascend-toolkit/*|*/ascend-toolkit|\
+            */ascend/ascend-toolkit/*|*/ascend/ascend-toolkit)
+                continue
+                ;;
+        esac
+
+        if [[ -z "${result}" ]]; then
+            result="${entry}"
+        else
+            result="${result}:${entry}"
+        fi
+    done
+
+    printf '%s' "${result}"
+}
+
+export LD_LIBRARY_PATH="$(clean_cann_path "${LD_LIBRARY_PATH:-}")"
+export PYTHONPATH="$(clean_cann_path "${PYTHONPATH:-}")"
+
+export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+echo "[CANN] Loading ${CANN_ENV}"
+
+# The vendor script may use optional environment probes.
+# Restore strict error handling immediately afterwards.
+set +e
+set +u
+source "${CANN_ENV}"
+CANN_SOURCE_STATUS=$?
+set -eo pipefail
+
+if [[ ${CANN_SOURCE_STATUS} -ne 0 ]]; then
+    echo "[WARN] CANN initialization returned ${CANN_SOURCE_STATUS}" >&2
+fi
+
+# Override potentially stale values from a copied set_env.sh.
+export ASCEND_HOME_PATH="${CANN_ROOT}"
+export ASCEND_TOOLKIT_HOME="${CANN_ROOT}"
+export ASCEND_OPP_PATH="${CANN_OPP_PATH}"
+
+echo "===== CANN environment ====="
+echo "CANN_ROOT=${CANN_ROOT}"
+echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
+echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
+echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+
+# Optional existing project-specific OPP kernel verification.
+if [[ -f "${SCRIPT_DIR}/scripts/find_working_cann.py" ]]; then
+    "${PYTHON_BIN}" \
+        "${SCRIPT_DIR}/scripts/find_working_cann.py" \
+        --check-opp "${ASCEND_OPP_PATH}" \
+        || exit 2
+fi
+
+# ============================================================
+# 2. Verify PyTorch / torch_npu / basic Cast operation
+# ============================================================
+
+"${PYTHON_BIN}" - <<'PY'
+import os
+import torch
+import torch_npu
+
+print("===== NPU environment verification =====")
+print("torch:", torch.__version__)
+print("torch_npu:", torch_npu.__version__)
+print("ASCEND_HOME_PATH:", os.environ.get("ASCEND_HOME_PATH"))
+print("ASCEND_OPP_PATH:", os.environ.get("ASCEND_OPP_PATH"))
+
+assert torch.npu.is_available(), "NPU unavailable"
+
+x = torch.arange(16, dtype=torch.float32, device="npu:0")
+y = x.to(torch.float16)
+torch.npu.synchronize()
+
+assert y.dtype == torch.float16
+print("[CANN] NPU Cast self-check passed")
+PY
+
+# ============================================================
+# 3. Enable diagnostic output for segmentation faults
+# ============================================================
+
+export PYTHONFAULTHANDLER=1
+export TORCH_SHOW_CPP_STACKTRACES=1
+
+# Enable only during debugging: changes execution timing.
+if [[ "${NPU_DEBUG_SYNC:-0}" == "1" ]]; then
+    export ASCEND_LAUNCH_BLOCKING=1
+fi
+
+
 # 统一代理与基础环境
 export GIT_SSL_NO_VERIFY=true
 export https_proxy=http://80.253.89.234:8080
@@ -86,14 +213,14 @@ ACCELERATE_PORT_ARGS=(--main_process_port "${MASTER_PORT}")
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/0709_top64_SFT_sci_if_math_code_1550_OPD_OpenMath_100_mmlu_200_HF}"
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/global_step_400}"
 
-MODEL_PATH="${MODEL_PATH:-/data2/model_train/ckpt/phase4_cpt_ar_diffusion_0916/models/global_step_10500}"
+MODEL_PATH="${MODEL_PATH:-/share/f50058111/model_train/ckpt/phase4_cpt_ar_duffision_0916/models/global_step_102500/}"
 # MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/Qwen3-1.7B-Base/}"
 
 # 当前脚本只执行一项普通 AR 生成评测；可通过环境变量覆盖。
 TASK="${TASK:-gsm8k}"
 NUM_FEWSHOT="${NUM_FEWSHOT:-5}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/eval_results_baseline}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/eval_results_CPT_Diffusion_AR_1023}"
 RUN_OUTPUT="${OUTPUT_ROOT}/${TASK}"
 LOG_DIR="${OUTPUT_ROOT}/logs"
 METRICS_ROOT="${OUTPUT_ROOT}/metrics"
