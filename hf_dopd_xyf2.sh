@@ -123,11 +123,11 @@ export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-60300-60399}"
 export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61300-61399}"
 export MASTER_PORT="${MASTER_PORT:-29503}"
 
-# Keep the active comparison surface identical to hf_diffusion_xyf2.sh's
-# currently enabled GSM8K run.
+# Keep the GSM8K 5-shot task used for the hf-diffusion comparison, but format
+# the complete request with the Qwen3 chat template used during d-OPD training.
 TASKS="${TASKS:-gsm8k}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_dopd_gsm8k_5shot_parity}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_dopd_gsm8k_5shot_qwen3_chat}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
 SEED="${SEED:-42}"
 MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
@@ -184,7 +184,7 @@ RUN_NAME="$(basename "${DCP_MODEL_PATH%/}")"
 RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
-DECODER_CACHE_VERSION="standalone-hf-dopd-gsm8k-5shot-hfdiffusion-parity-v3"
+DECODER_CACHE_VERSION="standalone-hf-dopd-gsm8k-5shot-qwen3-chat-v1"
 mkdir -p "${RUN_OUTPUT}"
 
 if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -203,7 +203,7 @@ if [[ -n "${MODEL_DEVICE}" ]]; then
   MODEL_ARGS+=",device=${MODEL_DEVICE}"
 fi
 
-CACHE_CONFIG_ID="$("${PYTHON_BIN}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}|max_new_tokens=${MAX_NEW_TOKENS}|task=gsm8k|fewshot=5|chat_template=false")"
+CACHE_CONFIG_ID="$("${PYTHON_BIN}" -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "${DECODER_CACHE_VERSION}|${MODEL_ARGS}|max_new_tokens=${MAX_NEW_TOKENS}|task=gsm8k|fewshot=5|chat_template=qwen3|fewshot_as_multiturn=true")"
 ACCELERATE_ARGS=(--num_processes "${NUM_DEVICES}" --num_machines 1 --mixed_precision no --dynamo_backend no --main_process_port "${MASTER_PORT}")
 if (( NUM_DEVICES > 1 )); then
   ACCELERATE_ARGS=(--multi_gpu "${ACCELERATE_ARGS[@]}")
@@ -258,8 +258,17 @@ if not 0 <= mask_token_id < int(config.vocab_size):
         f"[PREFLIGHT] mask_token_id={mask_token_id} is outside "
         f"vocab_size={config.vocab_size}."
     )
-AutoTokenizer.from_pretrained(
+tokenizer = AutoTokenizer.from_pretrained(
     model_path, local_files_only=True, trust_remote_code=False
+)
+if not getattr(tokenizer, "chat_template", None):
+    raise SystemExit(
+        "[PREFLIGHT] The converted checkpoint tokenizer has no Qwen3 chat_template."
+    )
+tokenizer.apply_chat_template(
+    [{"role": "user", "content": "Chat template preflight."}],
+    tokenize=False,
+    add_generation_prompt=True,
 )
 
 task_manager = TaskManager()
@@ -268,7 +277,7 @@ if missing:
     raise SystemExit(f"[PREFLIGHT] Unregistered lm-eval tasks: {missing}")
 
 print(
-    "[PREFLIGHT] HF config/tokenizer and lm-eval task passed "
+    "[PREFLIGHT] HF config/tokenizer, Qwen3 chat template, and lm-eval task passed "
     f"(transformers={transformers.__version__}, accelerate={accelerate.__version__})."
 )
 PY
@@ -309,7 +318,7 @@ run_task() {
   echo "起始状态      : response-aligned 全 MASK block"
   echo "重掩码        : low_confidence_static"
   echo "采样          : temperature=${DIFFUSION_TEMPERATURE}, top-p=${TOP_P}, top-k=${TOP_K},do_sample=false"
-  echo "Prompt        : 与 hf_diffusion_xyf2.sh 相同的原始 gsm8k 模板（不套 chat template）"
+  echo "Prompt        : gsm8k 5-shot，Qwen3 Chat Template，多轮 user/assistant few-shot"
   echo "生成          : ${fewshot}-shot, 1 completion, max ${MAX_NEW_TOKENS} tokens"
   echo "日志          : ${log_file}"
   echo "===================================================="
@@ -334,6 +343,8 @@ run_task() {
       --model_args "${MODEL_ARGS}" \
       --tasks "${task_name}" \
       --num_fewshot "${fewshot}" \
+      --apply_chat_template \
+      --fewshot_as_multiturn \
       --batch_size 1 \
       --gen_kwargs "max_gen_toks=${MAX_NEW_TOKENS},temperature=${DIFFUSION_TEMPERATURE},top_p=${TOP_P},do_sample=False" \
       --verbosity INFO \
@@ -359,7 +370,7 @@ run_task() {
   return "${exit_code}"
 }
 
-echo "===== d-OPD GSM8K 5-shot（与 hf_diffusion_xyf2.sh 对齐） ====="
+echo "===== d-OPD GSM8K 5-shot + Qwen3 Chat Template ====="
 task_selected gsm8k && run_task gsm8k gsm8k 1319 5
 
 echo "评测完成: ${RUN_OUTPUT}"
