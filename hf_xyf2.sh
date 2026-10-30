@@ -213,14 +213,14 @@ ACCELERATE_PORT_ARGS=(--main_process_port "${MASTER_PORT}")
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/0709_top64_SFT_sci_if_math_code_1550_OPD_OpenMath_100_mmlu_200_HF}"
 #MODEL_PATH="${MODEL_PATH:-/home/l00899529/code/OPD/weights/HF/global_step_400}"
 
-MODEL_PATH="${MODEL_PATH:-/share/f50058111/model_train/ckpt/phase4_cpt_ar_duffision_0916/models/global_step_102500/}"
+MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_ar_cpt_baseline_0920/models/global_step_102500/}"
 # MODEL_PATH="${MODEL_PATH:-/home/x00840191/model_train/Qwen3-1.7B-Base/}"
 
 # 当前脚本只执行一项普通 AR 生成评测；可通过环境变量覆盖。
 TASK="${TASK:-gsm8k}"
 NUM_FEWSHOT="${NUM_FEWSHOT:-5}"
 LIMIT="${LIMIT:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/eval_results_CPT_Diffusion_AR_1023}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/eval_results_CPT_baseline_AR_256}"
 RUN_OUTPUT="${OUTPUT_ROOT}/${TASK}"
 LOG_DIR="${OUTPUT_ROOT}/logs"
 METRICS_ROOT="${OUTPUT_ROOT}/metrics"
@@ -289,6 +289,7 @@ if HF_AR_METRICS_DIR="${METRICS_DIR}" \
     --tasks "${TASK}" \
     --num_fewshot "${NUM_FEWSHOT}" \
     --batch_size 1 \
+    # --gen_kwargs '{"do_sample":false,"max_gen_toks":256,"min_new_tokens":256,"until":[]}' \    #忽略EOS终止符
     --verbosity DEBUG \
     --log_samples \
     --output_path "${RUN_OUTPUT}" \
