@@ -19,6 +19,7 @@ import torch
 
 from lm_eval.api.registry import register_model
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.npu_operator_profile import NPUOperatorProfiler
 
 
 eval_logger = logging.getLogger(__name__)
@@ -32,6 +33,9 @@ class HFARMetricsLM(HFLM):
         self._ar_metrics_dir = os.environ.get("HF_AR_METRICS_DIR")
         self._ar_perf_metrics = self._new_ar_perf_metrics()
         super().__init__(*args, **kwargs)
+        self._npu_operator_profiler = NPUOperatorProfiler(
+            backend="ar", rank=int(self.rank)
+        )
 
         if self.backend != "causal":
             raise ValueError("hf-ar-metrics only supports decoder-only AR models.")
@@ -111,7 +115,9 @@ class HFARMetricsLM(HFLM):
         attention_mask: torch.Tensor | None = None,
         **generation_kwargs: Any,
     ) -> torch.Tensor:
-        if not getattr(self, "_ar_metrics_dir", None):
+        if not getattr(self, "_ar_metrics_dir", None) and not getattr(
+            self, "_npu_operator_profiler", None
+        ).is_enabled:
             return super()._model_generate(
                 context=context,
                 max_length=max_length,
@@ -122,10 +128,20 @@ class HFARMetricsLM(HFLM):
 
         forward_count = 0
         decode_start: float | None = None
+        profile_regions = []
+
+        def enter_top_level_forward(module, args, kwargs) -> None:
+            del module, args, kwargs
+            kind = "ar_prefill_forward" if forward_count == 0 else "ar_decode_forward"
+            region = self._npu_operator_profiler.region(kind)
+            region.__enter__()
+            profile_regions.append(region)
 
         def record_top_level_forward(module, args, kwargs, output) -> None:
             del module, args, kwargs, output
             nonlocal forward_count, decode_start
+            if profile_regions:
+                profile_regions.pop().__exit__(None, None, None)
             if forward_count == 0:
                 self._ar_perf_metrics["forward_counts"]["prefill"] += 1
                 # The first top-level forward is prompt prefill. Synchronizing
@@ -138,19 +154,28 @@ class HFARMetricsLM(HFLM):
 
         self._metrics_synchronize()
         generation_start = time.perf_counter()
+        pre_hook = self.model.register_forward_pre_hook(
+            enter_top_level_forward,
+            with_kwargs=True,
+        )
         hook = self.model.register_forward_hook(
             record_top_level_forward,
             with_kwargs=True,
         )
+        request_index = self._ar_perf_metrics["generation_requests"]
         try:
-            generated = super()._model_generate(
-                context=context,
-                max_length=max_length,
-                stop=stop,
-                attention_mask=attention_mask,
-                **generation_kwargs,
-            )
+            with self._npu_operator_profiler.request(request_index):
+                generated = super()._model_generate(
+                    context=context,
+                    max_length=max_length,
+                    stop=stop,
+                    attention_mask=attention_mask,
+                    **generation_kwargs,
+                )
         finally:
+            while profile_regions:
+                profile_regions.pop().__exit__(None, None, None)
+            pre_hook.remove()
             hook.remove()
         self._metrics_synchronize()
         generation_end = time.perf_counter()

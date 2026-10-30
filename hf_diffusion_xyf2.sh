@@ -134,6 +134,7 @@ BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-}"
 MASK_TOKEN_ID="${MASK_TOKEN_ID:-}"
 DIFFUSION_TEMPERATURE="${DIFFUSION_TEMPERATURE:-0.0}"
+IGNORE_EOS="${IGNORE_EOS:-0}"
 # THRESHOLD=0 keeps scheduled quota decoding. A value in (0, 1] accepts every
 # token above the threshold, then supplements with the highest-confidence
 # remaining tokens as needed to satisfy the current scheduled quota.
@@ -153,6 +154,7 @@ MC_NUM="${MC_NUM:-128}"
 MC_BATCH_SIZE="${MC_BATCH_SIZE:-16}"
 SEED="${SEED:-42}"
 LIMIT="${LIMIT:-}"
+GEN_KWARGS_JSON="${GEN_KWARGS_JSON:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-./eval_results_diffusion_b8_thre0.8}"
 MODEL_DEVICE="${MODEL_DEVICE:-}"
 # Every completed model response is committed to a rank-local SQLite file.
@@ -203,6 +205,25 @@ RUN_OUTPUT="${OUTPUT_ROOT}/${RUN_NAME}"
 METRICS_ROOT="${METRICS_ROOT:-${RUN_OUTPUT}/metrics}"
 mkdir -p "${RUN_OUTPUT}"
 
+# Optional bounded Ascend operator profiling. A forward-scoped trace keeps the
+# Level1 export small; request scope is also supported for cumulative analysis.
+# Use a fresh OUTPUT_ROOT/RESPONSE_CACHE_ROOT for every profiling target so a
+# cached lm-eval response cannot skip the model call being profiled.
+NPU_PROFILE="${NPU_PROFILE:-0}"
+if [[ "${NPU_PROFILE}" == "1" ]]; then
+  export HF_NPU_PROFILE_DIR="${HF_NPU_PROFILE_DIR:-${RUN_OUTPUT}/npu_profile}"
+  export HF_NPU_PROFILE_SCOPE="${HF_NPU_PROFILE_SCOPE:-forward}"
+  export HF_NPU_PROFILE_REQUEST_START="${HF_NPU_PROFILE_REQUEST_START:-1}"
+  export HF_NPU_PROFILE_REQUEST_COUNT="${HF_NPU_PROFILE_REQUEST_COUNT:-1}"
+  export HF_NPU_PROFILE_TARGET="${HF_NPU_PROFILE_TARGET:-diffusion_denoise_forward}"
+  export HF_NPU_PROFILE_TARGET_OCCURRENCE="${HF_NPU_PROFILE_TARGET_OCCURRENCE:-56}"
+  export HF_NPU_PROFILE_RANKS="${HF_NPU_PROFILE_RANKS:-0}"
+  export HF_NPU_PROFILE_LEVEL="${HF_NPU_PROFILE_LEVEL:-level1}"
+  export HF_NPU_PROFILE_EXPORT_TYPE="${HF_NPU_PROFILE_EXPORT_TYPE:-text}"
+  export HF_NPU_PROFILE_WITH_CPU="${HF_NPU_PROFILE_WITH_CPU:-1}"
+  export HF_NPU_PROFILE_RECORD_SHAPES="${HF_NPU_PROFILE_RECORD_SHAPES:-1}"
+fi
+
 if ! [[ "${MAX_TASK_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "MAX_TASK_ATTEMPTS must be a positive integer, got: ${MAX_TASK_ATTEMPTS}" >&2
   exit 2
@@ -235,7 +256,7 @@ if [[ "${THRESHOLD_MODE}" == "strict" ]]; then
   fi
 fi
 
-MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},threshold=${THRESHOLD},threshold_mode=${THRESHOLD_MODE},trace_requests_per_rank=${TRACE_REQUESTS_PER_RANK},trace_blocks_per_request=${TRACE_BLOCKS_PER_REQUEST},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
+MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},ignore_eos=${IGNORE_EOS},threshold=${THRESHOLD},threshold_mode=${THRESHOLD_MODE},trace_requests_per_rank=${TRACE_REQUESTS_PER_RANK},trace_blocks_per_request=${TRACE_BLOCKS_PER_REQUEST},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
 if [[ -n "${DIFFUSION_STEPS}" ]]; then
   MODEL_ARGS+=",diffusion_steps=${DIFFUSION_STEPS}"
 fi
@@ -270,6 +291,10 @@ LIMIT_ARGS=()
 if [[ -n "${LIMIT}" ]]; then
   LIMIT_ARGS=(--limit "${LIMIT}")
 fi
+GEN_ARGS=()
+if [[ -n "${GEN_KWARGS_JSON}" ]]; then
+  GEN_ARGS=(--gen_kwargs "${GEN_KWARGS_JSON}")
+fi
 
 task_selected() {
   [[ ",${TASKS}," == *",$1,"* ]]
@@ -300,6 +325,7 @@ run_task() {
   echo "Block size : ${BLOCK_LENGTH}"
   echo "Diff steps : ${DIFFUSION_STEPS:-auto}"
   echo "Threshold  : ${THRESHOLD}"
+  echo "Ignore EOS : ${IGNORE_EOS}"
   echo "Thresh mode: ${THRESHOLD_MODE}"
   echo "Max steps/B: ${MAX_DENOISING_STEPS_PER_BLOCK:-n/a}"
   echo "Trace      : ${TRACE_REQUESTS_PER_RANK} request(s)/rank, ${TRACE_BLOCKS_PER_REQUEST} block(s)/request"
@@ -308,6 +334,7 @@ run_task() {
   echo "Metrics dir: ${metrics_run_dir}"
   echo "Cache ID   : ${CACHE_CONFIG_ID}"
   echo "Decoder ver: ${DECODER_CACHE_VERSION}"
+  echo "NPU profile: ${HF_NPU_PROFILE_DIR:-disabled}"
   echo "Cache files: ${cache_prefix}_rank<N>.db"
   echo "HCCL wait  : connect=${HCCL_CONNECT_TIMEOUT}s, exec=${HCCL_EXEC_TIMEOUT}s"
   echo "Start time : $(date '+%F %T')"
@@ -344,6 +371,7 @@ run_task() {
       --tasks "${task}" \
       --num_fewshot "${fewshot}" \
       --batch_size 1 \
+      "${GEN_ARGS[@]}" \
       --verbosity INFO \
       --log_samples \
       --use_cache "${cache_prefix}" \
@@ -368,6 +396,15 @@ run_task() {
         echo "[ERROR] Failed to create diffusion summary log." \
           | tee -a "${log_file}"
         return 1
+      fi
+      if [[ -n "${HF_NPU_PROFILE_DIR:-}" ]]; then
+        if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/summarize_npu_profile.py" \
+          --profile "diffusion=${HF_NPU_PROFILE_DIR}" \
+          --output-dir "${HF_NPU_PROFILE_DIR}/summary"; then
+          echo "[ERROR] Failed to summarize the NPU operator profile." \
+            | tee -a "${log_file}"
+          return 1
+        fi
       fi
       return 0
     else

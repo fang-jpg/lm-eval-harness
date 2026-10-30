@@ -10,6 +10,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
 from lm_eval.api.registry import get_model
 from lm_eval.models.hf_diffusion import HFDiffusionLM
+from lm_eval.models.npu_operator_profile import NPUOperatorProfiler
 
 
 class _CacheHook:
@@ -56,6 +57,7 @@ def _make_lm(model, *, mc_num=8, mc_batch_size=4):
     lm.mc_num = mc_num
     lm.mc_batch_size = mc_batch_size
     lm.check_greedy = True
+    lm.ignore_eos = False
     lm.threshold_mode = "scheduled"
     lm.max_denoising_steps_per_block = None
     lm.trace_requests_per_rank = 0
@@ -63,6 +65,7 @@ def _make_lm(model, *, mc_num=8, mc_batch_size=4):
     lm.mixed_precision_dtype = None
     lm._rank = 0
     lm.cache_hook = _CacheHook()
+    lm._npu_operator_profiler = NPUOperatorProfiler("test", rank=0)
     return lm
 
 

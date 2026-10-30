@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 from lm_eval.api.registry import register_model
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.npu_operator_profile import NPUOperatorProfiler
 
 
 if TYPE_CHECKING:
@@ -41,6 +42,17 @@ def _as_optional_int(value: int | str | None) -> int | None:
     if value is None or value == "" or str(value).lower() == "none":
         return None
     return int(value)
+
+
+def _as_bool(value: bool | str) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Expected a boolean value, got {value!r}.")
 
 
 @register_model("hf-diffusion")
@@ -71,6 +83,7 @@ class HFDiffusionLM(HFLM):
         mc_num: int | str = 128,
         mc_batch_size: int | str = 16,
         check_greedy: bool = False,
+        ignore_eos: bool | str = False,
         seed: int | str = 42,
         **kwargs,
     ) -> None:
@@ -95,6 +108,7 @@ class HFDiffusionLM(HFLM):
         self.mc_num = int(mc_num)
         self.mc_batch_size = int(mc_batch_size)
         self.check_greedy = bool(check_greedy)
+        self.ignore_eos = _as_bool(ignore_eos)
         self.seed = int(seed)
         self._generation_calls = 0
         self._perf_metrics = self._new_perf_metrics()
@@ -106,6 +120,9 @@ class HFDiffusionLM(HFLM):
         # changing only self._config would leave the real model on SDPA.
         kwargs["attn_implementation"] = "eager"
         super().__init__(*args, **kwargs)
+        self._npu_operator_profiler = NPUOperatorProfiler(
+            backend="diffusion", rank=int(self.rank)
+        )
 
         if self.backend != "causal":
             raise ValueError(
@@ -359,6 +376,7 @@ class HFDiffusionLM(HFLM):
                     "trace_requests_per_rank": self.trace_requests_per_rank,
                     "trace_blocks_per_request": self.trace_blocks_per_request,
                     "diffusion_temperature": self.diffusion_temperature,
+                    "ignore_eos": self.ignore_eos,
                 },
             }
             decode_seconds = float(payload["decode_seconds"])
@@ -532,6 +550,21 @@ class HFDiffusionLM(HFLM):
         max_new_tokens: int,
         temperature: float,
     ) -> torch.Tensor:
+        metrics = getattr(self, "_perf_metrics", None)
+        request_index = metrics["generation_requests"] if metrics is not None else 0
+        with self._npu_operator_profiler.request(request_index):
+            return self._generate_one_impl(
+                prompt_ids=prompt_ids,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+            )
+
+    def _generate_one_impl(
+        self,
+        prompt_ids: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float,
+    ) -> torch.Tensor:
         """Generate one unpadded sequence with hybrid block diffusion.
 
         This deliberately preserves the evaluator used on 2026-10-12:
@@ -555,13 +588,14 @@ class HFDiffusionLM(HFLM):
             total_steps = self.diffusion_steps or max_new_tokens
             steps_per_block = self._allocate_steps(total_steps, num_blocks)
 
-        with self._autocast_context():
-            self._increment_forward_count("prefill")
-            prefill = model(
-                input_ids=prompt_ids,
-                use_cache=True,
-                return_dict=True,
-            )
+        with self._npu_operator_profiler.region("diffusion_prefill_forward"):
+            with self._autocast_context():
+                self._increment_forward_count("prefill")
+                prefill = model(
+                    input_ids=prompt_ids,
+                    use_cache=True,
+                    return_dict=True,
+                )
         past_key_values = prefill.past_key_values
         next_token_confidence, next_token = self._sample(
             prefill.logits[:, -1, :], temperature
@@ -634,27 +668,34 @@ class HFDiffusionLM(HFLM):
                 if not mutable.any():
                     break
                 mutable_before = mutable.clone()
-                denoise_cache = copy.deepcopy(past_key_values)
-                with self._autocast_context():
-                    self._increment_forward_count("denoise")
-                    denoise = model(
-                        input_ids=block,
-                        attention_mask=self._bidirectional_mask(),
-                        past_key_values=denoise_cache,
-                        position_ids=position_ids,
-                        cache_position=cache_position,
-                        use_cache=True,
-                        return_dict=True,
+                with self._npu_operator_profiler.region("diffusion_cache_copy"):
+                    denoise_cache = copy.deepcopy(past_key_values)
+                with self._npu_operator_profiler.region(
+                    "diffusion_denoise_forward"
+                ):
+                    with self._autocast_context():
+                        self._increment_forward_count("denoise")
+                        denoise = model(
+                            input_ids=block,
+                            attention_mask=self._bidirectional_mask(),
+                            past_key_values=denoise_cache,
+                            position_ids=position_ids,
+                            cache_position=cache_position,
+                            use_cache=True,
+                            return_dict=True,
+                        )
+                with self._npu_operator_profiler.region(
+                    "diffusion_sample_and_select"
+                ):
+                    confidence, proposed = self._sample(denoise.logits, temperature)
+                    confidence = confidence.masked_fill(~mutable, -torch.inf)
+                    updates, accepted_count, step_progress_tokens = self._select_updates(
+                        confidence,
+                        mutable,
+                        initial_count,
+                        step_index,
+                        steps_per_block[block_index],
                     )
-                confidence, proposed = self._sample(denoise.logits, temperature)
-                confidence = confidence.masked_fill(~mutable, -torch.inf)
-                updates, accepted_count, step_progress_tokens = self._select_updates(
-                    confidence,
-                    mutable,
-                    initial_count,
-                    step_index,
-                    steps_per_block[block_index],
-                )
                 progress_updates = torch.zeros_like(updates)
                 if step_progress_tokens:
                     progress_updates = (
@@ -735,7 +776,7 @@ class HFDiffusionLM(HFLM):
             generated += current_length
 
             eos_end = None
-            eos_token_id = self.tokenizer.eos_token_id
+            eos_token_id = None if self.ignore_eos else self.tokenizer.eos_token_id
             if eos_token_id is not None:
                 eos_positions = torch.nonzero(
                     output_ids[0, prompt_length:].eq(eos_token_id), as_tuple=False
@@ -748,16 +789,19 @@ class HFDiffusionLM(HFLM):
 
             # Preserve the 2026-10-12 hybrid decoder: a completed block is
             # inserted into the persistent cache with ordinary causal attention.
-            with self._autocast_context():
-                self._increment_forward_count("causal")
-                causal = model(
-                    input_ids=block,
-                    past_key_values=past_key_values,
-                    position_ids=position_ids,
-                    cache_position=cache_position,
-                    use_cache=True,
-                    return_dict=True,
-                )
+            with self._npu_operator_profiler.region(
+                "diffusion_causal_refresh_forward"
+            ):
+                with self._autocast_context():
+                    self._increment_forward_count("causal")
+                    causal = model(
+                        input_ids=block,
+                        past_key_values=past_key_values,
+                        position_ids=position_ids,
+                        cache_position=cache_position,
+                        use_cache=True,
+                        return_dict=True,
+                    )
             past_key_values = causal.past_key_values
             if block_index + 1 < num_blocks:
                 next_token_confidence, next_token = self._sample(

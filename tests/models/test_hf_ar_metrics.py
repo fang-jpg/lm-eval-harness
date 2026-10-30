@@ -3,6 +3,7 @@ import torch
 from lm_eval.api.registry import get_model
 from lm_eval.models.hf_ar_metrics import HFARMetricsLM
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.npu_operator_profile import NPUOperatorProfiler
 
 
 class _FakeARModel(torch.nn.Module):
@@ -49,6 +50,7 @@ def test_ar_metrics_backend_counts_prefill_and_decode_without_changing_output(
     lm.batch_size_per_gpu = 1
     lm._ar_metrics_dir = "enabled-for-test"
     lm._ar_perf_metrics = lm._new_ar_perf_metrics()
+    lm._npu_operator_profiler = NPUOperatorProfiler("test", rank=0)
 
     context = torch.tensor([[1, 2, 3]])
     output = lm._model_generate(

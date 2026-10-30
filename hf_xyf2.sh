@@ -180,6 +180,10 @@ export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61100-61199}"
 export MASTER_PORT="${MASTER_PORT:-29501}"
 # export MASTER_PORT="${MASTER_PORT:-29502}"
 ACCELERATE_PORT_ARGS=(--main_process_port "${MASTER_PORT}")
+ACCELERATE_ARGS=(--num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}")
+if (( NUM_GPUS > 1 )); then
+    ACCELERATE_ARGS=(--multi_gpu "${ACCELERATE_ARGS[@]}")
+fi
 
 # 待评测 HF 权重路径
 # MODEL_PATH="${MODEL_PATH:-/home/l00899529/OPD/weights/OPD_200_GSM_DAPO}"
@@ -220,6 +224,7 @@ MODEL_PATH="${MODEL_PATH:-/share/dataset/x00840191/model_train/ckpt/qwen3_1.7b_a
 TASK="${TASK:-gsm8k}"
 NUM_FEWSHOT="${NUM_FEWSHOT:-5}"
 LIMIT="${LIMIT:-}"
+GEN_KWARGS_JSON="${GEN_KWARGS_JSON:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/eval_results_CPT_baseline_AR_256}"
 RUN_OUTPUT="${OUTPUT_ROOT}/${TASK}"
 LOG_DIR="${OUTPUT_ROOT}/logs"
@@ -230,10 +235,34 @@ LOG_FILE="${LOG_DIR}/${TASK}_${TIMESTAMP}.log"
 SUMMARY_LOG="${LOG_DIR}/${TASK}_${TIMESTAMP}_summary.log"
 mkdir -p "${RUN_OUTPUT}" "${LOG_DIR}" "${METRICS_DIR}"
 
+# Optional bounded Ascend operator profiling. By default only rank 0 is
+# profiled. For a representative decode forward after warm-up, use for example:
+#   NPU_PROFILE=1 HF_NPU_PROFILE_SCOPE=forward \
+#   HF_NPU_PROFILE_TARGET=ar_decode_forward \
+#   HF_NPU_PROFILE_TARGET_OCCURRENCE=127 LIMIT=2 bash hf_xyf2.sh
+NPU_PROFILE="${NPU_PROFILE:-0}"
+if [[ "${NPU_PROFILE}" == "1" ]]; then
+  export HF_NPU_PROFILE_DIR="${HF_NPU_PROFILE_DIR:-${OUTPUT_ROOT}/npu_profile}"
+  export HF_NPU_PROFILE_SCOPE="${HF_NPU_PROFILE_SCOPE:-forward}"
+  export HF_NPU_PROFILE_REQUEST_START="${HF_NPU_PROFILE_REQUEST_START:-1}"
+  export HF_NPU_PROFILE_REQUEST_COUNT="${HF_NPU_PROFILE_REQUEST_COUNT:-1}"
+  export HF_NPU_PROFILE_TARGET="${HF_NPU_PROFILE_TARGET:-ar_decode_forward}"
+  export HF_NPU_PROFILE_TARGET_OCCURRENCE="${HF_NPU_PROFILE_TARGET_OCCURRENCE:-127}"
+  export HF_NPU_PROFILE_RANKS="${HF_NPU_PROFILE_RANKS:-0}"
+  export HF_NPU_PROFILE_LEVEL="${HF_NPU_PROFILE_LEVEL:-level1}"
+  export HF_NPU_PROFILE_EXPORT_TYPE="${HF_NPU_PROFILE_EXPORT_TYPE:-text}"
+  export HF_NPU_PROFILE_WITH_CPU="${HF_NPU_PROFILE_WITH_CPU:-1}"
+  export HF_NPU_PROFILE_RECORD_SHAPES="${HF_NPU_PROFILE_RECORD_SHAPES:-1}"
+fi
+
 MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True"
 LIMIT_ARGS=()
 if [[ -n "${LIMIT}" ]]; then
   LIMIT_ARGS=(--limit "${LIMIT}")
+fi
+GEN_ARGS=()
+if [[ -n "${GEN_KWARGS_JSON}" ]]; then
+  GEN_ARGS=(--gen_kwargs "${GEN_KWARGS_JSON}")
 fi
 
 # ---------------------------------------------------------------------------
@@ -279,17 +308,18 @@ echo "Results    : ${RUN_OUTPUT}"
 echo "Metrics    : ${METRICS_DIR}"
 echo "Log        : ${LOG_FILE}"
 echo "Summary    : ${SUMMARY_LOG}"
+echo "NPU profile: ${HF_NPU_PROFILE_DIR:-disabled}"
 echo "Start time : $(date '+%F %T')"
 echo "===================================================="
 
 if HF_AR_METRICS_DIR="${METRICS_DIR}" \
-  accelerate launch --multi_gpu --num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}" \
+  accelerate launch "${ACCELERATE_ARGS[@]}" \
     -m lm_eval --model hf-ar-metrics \
     --model_args "${MODEL_ARGS}" \
     --tasks "${TASK}" \
     --num_fewshot "${NUM_FEWSHOT}" \
     --batch_size 1 \
-    # --gen_kwargs '{"do_sample":false,"max_gen_toks":256,"min_new_tokens":256,"until":[]}' \    #忽略EOS终止符
+    "${GEN_ARGS[@]}" \
     --verbosity DEBUG \
     --log_samples \
     --output_path "${RUN_OUTPUT}" \
@@ -302,6 +332,11 @@ if HF_AR_METRICS_DIR="${METRICS_DIR}" \
     --task "${TASK}" \
     --model "${MODEL_PATH}" \
     --source-log "${LOG_FILE}"
+  if [[ -n "${HF_NPU_PROFILE_DIR:-}" ]]; then
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/summarize_npu_profile.py" \
+      --profile "ar=${HF_NPU_PROFILE_DIR}" \
+      --output-dir "${HF_NPU_PROFILE_DIR}/summary"
+  fi
   echo "[SUMMARY] Accuracy and AR performance: ${SUMMARY_LOG}" | tee -a "${LOG_FILE}"
 else
   EXIT_CODE="${PIPESTATUS[0]}"
