@@ -39,6 +39,7 @@ clean_cann_path() {
 
         case "${entry}" in
             *Ascend910B_CANN_*|*Ascend910C_CANN_*|\
+            */Ascend/cann-*|*/Ascend/cann-*/*|\
             */ascend-toolkit/*|*/ascend-toolkit|\
             */ascend/ascend-toolkit/*|*/ascend/ascend-toolkit)
                 continue
@@ -180,7 +181,13 @@ export HCCL_NPU_SOCKET_PORT_RANGE="${HCCL_NPU_SOCKET_PORT_RANGE:-61100-61199}"
 export MASTER_PORT="${MASTER_PORT:-29501}"
 # export MASTER_PORT="${MASTER_PORT:-29502}"
 ACCELERATE_PORT_ARGS=(--main_process_port "${MASTER_PORT}")
-ACCELERATE_ARGS=(--num_processes "${NUM_GPUS}" "${ACCELERATE_PORT_ARGS[@]}")
+ACCELERATE_ARGS=(
+    --num_processes "${NUM_GPUS}"
+    --num_machines 1
+    --mixed_precision no
+    --dynamo_backend no
+    "${ACCELERATE_PORT_ARGS[@]}"
+)
 if (( NUM_GPUS > 1 )); then
     ACCELERATE_ARGS=(--multi_gpu "${ACCELERATE_ARGS[@]}")
 fi
@@ -226,6 +233,7 @@ NUM_FEWSHOT="${NUM_FEWSHOT:-5}"
 LIMIT="${LIMIT:-}"
 GEN_KWARGS_JSON="${GEN_KWARGS_JSON:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/eval_results_CPT_baseline_AR_256}"
+MODEL_DEVICE="${MODEL_DEVICE:-}"
 RUN_OUTPUT="${OUTPUT_ROOT}/${TASK}"
 LOG_DIR="${OUTPUT_ROOT}/logs"
 METRICS_ROOT="${OUTPUT_ROOT}/metrics"
@@ -256,6 +264,15 @@ if [[ "${NPU_PROFILE}" == "1" ]]; then
 fi
 
 MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True"
+# HFLM historically defaults to "cuda" in a single-process launch. Explicitly
+# select the visible NPU for one-device profiling; Accelerate owns placement in
+# multi-process runs.
+if [[ -z "${MODEL_DEVICE}" && "${NUM_GPUS}" == "1" ]]; then
+  MODEL_DEVICE="npu:0"
+fi
+if [[ -n "${MODEL_DEVICE}" ]]; then
+  MODEL_ARGS+=",device=${MODEL_DEVICE}"
+fi
 LIMIT_ARGS=()
 if [[ -n "${LIMIT}" ]]; then
   LIMIT_ARGS=(--limit "${LIMIT}")
