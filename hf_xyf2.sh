@@ -265,13 +265,15 @@ fi
 
 MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True"
 # HFLM historically defaults to "cuda" in a single-process launch. Explicitly
-# select the visible NPU for one-device profiling; Accelerate owns placement in
-# multi-process runs.
+# select the visible NPU through lm-eval's top-level --device option for
+# one-device profiling; Accelerate owns placement in multi-process runs. Do not
+# put device in MODEL_ARGS because recent lm-eval versions pass it separately.
 if [[ -z "${MODEL_DEVICE}" && "${NUM_GPUS}" == "1" ]]; then
   MODEL_DEVICE="npu:0"
 fi
+DEVICE_ARGS=()
 if [[ -n "${MODEL_DEVICE}" ]]; then
-  MODEL_ARGS+=",device=${MODEL_DEVICE}"
+  DEVICE_ARGS=(--device "${MODEL_DEVICE}")
 fi
 LIMIT_ARGS=()
 if [[ -n "${LIMIT}" ]]; then
@@ -336,6 +338,7 @@ if HF_AR_METRICS_DIR="${METRICS_DIR}" \
     --tasks "${TASK}" \
     --num_fewshot "${NUM_FEWSHOT}" \
     --batch_size 1 \
+    "${DEVICE_ARGS[@]}" \
     "${GEN_ARGS[@]}" \
     --verbosity DEBUG \
     --log_samples \

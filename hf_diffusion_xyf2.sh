@@ -268,12 +268,14 @@ if [[ -n "${MASK_TOKEN_ID}" ]]; then
 fi
 # HFLM's historical default is "cuda". Accelerate overrides it for a
 # multi-process NPU launch, but a one-process NPU smoke test needs an explicit
-# local device.
+# local device through lm-eval's top-level --device option. Do not put device
+# in MODEL_ARGS because recent lm-eval versions pass it separately.
 if [[ -z "${MODEL_DEVICE}" && "${NUM_DEVICES}" == "1" ]]; then
   MODEL_DEVICE="npu:0"
 fi
+DEVICE_ARGS=()
 if [[ -n "${MODEL_DEVICE}" ]]; then
-  MODEL_ARGS+=",device=${MODEL_DEVICE}"
+  DEVICE_ARGS=(--device "${MODEL_DEVICE}")
 fi
 
 # CachingLM's request key contains the prompt and generation kwargs, but not
@@ -371,6 +373,7 @@ run_task() {
       --tasks "${task}" \
       --num_fewshot "${fewshot}" \
       --batch_size 1 \
+      "${DEVICE_ARGS[@]}" \
       "${GEN_ARGS[@]}" \
       --verbosity INFO \
       --log_samples \

@@ -43,6 +43,17 @@ actually stops before 256 tokens, set `PROFILE_IGNORE_EOS=1`; record that as a
 separate experiment because removing the per-block EOS check also removes its
 host/device synchronization cost.
 
+For an eight-device data-parallel run, set:
+
+```bash
+PROFILE_DEVICE=0,1,2,3,4,5,6,7 bash profile_ar_diffusion_operators.sh
+```
+
+The wrapper then defaults `PROFILE_LIMIT` to 16, ensuring that each rank gets
+one warm-up request and one profiled request. Only rank 0 writes an operator
+trace; the other ranks reproduce the distributed evaluation workload without
+creating seven additional large traces.
+
 The final report is:
 
 ```text
