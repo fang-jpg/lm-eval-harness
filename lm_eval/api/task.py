@@ -61,6 +61,25 @@ eval_logger = logging.getLogger(__name__)
 TaskConfig = TaskConfig
 
 
+def _rank_slice_limit(
+    limit: int | None, *, rank: int, world_size: int
+) -> int | None:
+    """Translate a global document limit into this rank's slice length.
+
+    ``doc_iterator`` applies a global limit before distributing documents with
+    ``islice(raw_iterator, rank, limit, world_size)``. Request caching builds
+    and stores the complete shard for each rank, so applying the global limit
+    directly to a cached shard would evaluate ``limit`` documents *per rank*.
+    This helper preserves the uncached iterator semantics when slicing a
+    rank-local cache.
+    """
+    if limit is None or limit == 0:
+        return None
+    if limit <= rank:
+        return 0
+    return (limit - rank + world_size - 1) // world_size
+
+
 class Task(abc.ABC):
     """A task represents an entire benchmark including its dataset, problems,
     answers, and evaluation methods. See BoolQ for a simple example implementation
@@ -284,6 +303,9 @@ class Task(abc.ABC):
 
         # used with caching
         og_limit = limit
+        rank_limit = _rank_slice_limit(
+            og_limit, rank=int(rank), world_size=int(world_size)
+        )
 
         cache_key = f"requests-{self._config.task}-{self.config.num_fewshot}shot-rank{rank}-world_size{world_size}"
         cache_key += "-chat_template" if apply_chat_template else ""
@@ -298,7 +320,7 @@ class Task(abc.ABC):
         cached_instances = load_from_cache(file_name=cache_key, cache=cache_requests)
 
         if cache_requests and cached_instances and not rewrite_requests_cache:
-            cached_instances = cached_instances[:limit]
+            cached_instances = cached_instances[:rank_limit]
 
             flattened_instances = [
                 instance
@@ -362,7 +384,7 @@ class Task(abc.ABC):
 
         # now flatten, this is to allow slicing to work with pickles
 
-        sliced_instances = instances[:og_limit]
+        sliced_instances = instances[:rank_limit]
 
         flattened_instances = [
             instance
