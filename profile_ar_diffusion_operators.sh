@@ -40,6 +40,9 @@ DIFFUSION_DENOISE_OCCURRENCE="${DIFFUSION_DENOISE_OCCURRENCE:-56}"
 DIFFUSION_REFRESH_OCCURRENCE="${DIFFUSION_REFRESH_OCCURRENCE:-31}"
 # Cache copies now occur once per block, so block 32 is near generated token 128.
 DIFFUSION_CACHE_COPY_OCCURRENCE="${DIFFUSION_CACHE_COPY_OCCURRENCE:-31}"
+# The first reset is sufficient to verify that reference restoration launches
+# no NPU Slice/TensorMove kernel and avoids assumptions about denoise counts.
+DIFFUSION_CACHE_RESET_OCCURRENCE="${DIFFUSION_CACHE_RESET_OCCURRENCE:-0}"
 DIFFUSION_SAMPLE_OCCURRENCE="${DIFFUSION_SAMPLE_OCCURRENCE:-56}"
 
 GEN_KWARGS_JSON="${GEN_KWARGS_JSON:-{\"do_sample\":false,\"max_gen_toks\":${MAX_GEN_TOKENS},\"min_new_tokens\":${MAX_GEN_TOKENS},\"until\":[]}}"
@@ -155,12 +158,14 @@ if [[ "${RUN_STAGE_PROFILES}" == "1" ]]; then
   run_diffusion_profile diffusion_denoise_forward "${DIFFUSION_DENOISE_OCCURRENCE}" diffusion_denoise
   run_diffusion_profile diffusion_causal_refresh_forward "${DIFFUSION_REFRESH_OCCURRENCE}" diffusion_refresh
   run_diffusion_profile diffusion_cache_copy "${DIFFUSION_CACHE_COPY_OCCURRENCE}" diffusion_cache_copy
+  run_diffusion_profile diffusion_cache_reset "${DIFFUSION_CACHE_RESET_OCCURRENCE}" diffusion_cache_reset
   run_diffusion_profile diffusion_sample_and_select "${DIFFUSION_SAMPLE_OCCURRENCE}" diffusion_sample
   SUMMARY_ARGS+=(
     --profile "ar_decode=${PROFILE_ROOT}/ar_decode/trace"
     --profile "diffusion_denoise=${PROFILE_ROOT}/diffusion_denoise/trace"
     --profile "diffusion_refresh=${PROFILE_ROOT}/diffusion_refresh/trace"
     --profile "diffusion_cache_copy=${PROFILE_ROOT}/diffusion_cache_copy/trace"
+    --profile "diffusion_cache_reset=${PROFILE_ROOT}/diffusion_cache_reset/trace"
     --profile "diffusion_sample=${PROFILE_ROOT}/diffusion_sample/trace"
   )
 fi

@@ -25,13 +25,14 @@ request traces, which provide the per-operator total-time comparison:
 - `ar_request`
 - `diffusion_request`
 
-It then captures five bounded stage traces near generated token 128, which
+It then captures six bounded stage traces (most near generated token 128), which
 explain the per-call cost:
 
 - `ar_decode_forward`
 - `diffusion_denoise_forward`
 - `diffusion_causal_refresh_forward`
 - `diffusion_cache_copy`
+- `diffusion_cache_reset` (first occurrence; expected to launch no NPU kernel)
 - `diffusion_sample_and_select`
 
 Every target is run in a fresh process and with a fresh response-cache path.
@@ -106,8 +107,9 @@ Check these hypotheses in order:
    more work in every diffusion forward.
 3. **KV-cache scratch reuse.** `diffusion_cache_copy` identifies the one
    `copy.deepcopy(past_key_values)` used to initialize each block's scratch
-   cache. Later denoise steps crop that scratch cache back to the immutable
-   causal-prefix length under `diffusion_cache_reset`. Use the full
+   cache. Later denoise steps restore saved per-layer prefix Tensor references
+   under `diffusion_cache_reset`, avoiding both TensorMove and Slice kernels.
+   Use the full
    `diffusion_request` trace to verify that cumulative copy calls and time fall;
    a single `diffusion_cache_copy` occurrence should cost roughly the same.
 4. **Full-vocabulary selection.** `diffusion_sample_and_select` exposes the

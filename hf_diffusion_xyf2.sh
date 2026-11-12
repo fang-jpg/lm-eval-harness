@@ -163,7 +163,7 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
 # Bump this whenever decoding semantics or the timed execution path changes so
 # a benchmark cannot reuse responses produced by an older implementation.
-DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-scratch-cache-v6}"
+DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-reference-reset-v7}"
 # Total attempts, including the first one.  A retry only computes responses
 # still missing from each rank-local cache, so an extra attempt is inexpensive
 # and covers a slow rank that needs more than one timeout window to catch up.

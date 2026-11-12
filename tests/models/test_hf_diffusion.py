@@ -336,11 +336,23 @@ def test_strict_threshold_reuses_one_scratch_cache_per_block_with_trace(
         clone_calls.append(past_key_values.get_seq_length())
         return original_clone(past_key_values)
 
-    def record_reset(denoise_cache, prefix_length):
+    def record_reset(denoise_cache, prefix_state, prefix_length):
         before = denoise_cache.get_seq_length()
-        original_reset(denoise_cache, prefix_length)
+        original_reset(denoise_cache, prefix_state, prefix_length)
+        layers = denoise_cache.layers
+        restored_by_reference = all(
+            layer.keys is keys and layer.values is values
+            for layer, (keys, values, _) in zip(
+                layers, prefix_state, strict=True
+            )
+        )
         reset_calls.append(
-            (before, prefix_length, denoise_cache.get_seq_length())
+            (
+                before,
+                prefix_length,
+                denoise_cache.get_seq_length(),
+                restored_by_reference,
+            )
         )
 
     monkeypatch.setattr(lm, "_clone_denoise_cache", record_clone)
@@ -352,9 +364,10 @@ def test_strict_threshold_reuses_one_scratch_cache_per_block_with_trace(
     assert output.shape == (1, 9)
     assert not output[:, prompt.shape[1] :].eq(lm.mask_token_id).any()
     # Two denoise steps in each of two blocks now require two deep copies, not
-    # four. The second step in each block reuses and crops its scratch cache.
+    # four. The second step restores the original prefix Tensor objects without
+    # crop(), so reset itself does not need a device Slice or TensorMove.
     assert clone_calls == [3, 6]
-    assert reset_calls == [(6, 3, 3), (9, 6, 6)]
+    assert reset_calls == [(6, 3, 3, True), (9, 6, 6, True)]
     request = lm._perf_metrics["requests"][0]
     assert lm._perf_metrics["cache_counts"] == {"deepcopy": 2, "reset": 2}
     assert request["cache_deepcopy_count"] == 2
@@ -372,6 +385,17 @@ def test_strict_threshold_reuses_one_scratch_cache_per_block_with_trace(
             if token["accepted_for_progress"]
         ]
         assert len(accepted_for_progress) == 1
+
+    # Deterministic generation must remain identical to the previous crop-based
+    # scratch reset; only the cache-maintenance mechanism is changing.
+    def crop_reset(denoise_cache, prefix_state, prefix_length):
+        del prefix_state
+        denoise_cache.crop(prefix_length)
+
+    monkeypatch.setattr(lm, "_reset_denoise_cache", crop_reset)
+    lm._perf_metrics = lm._new_perf_metrics()
+    crop_output = lm._generate_one(prompt, max_new_tokens=6, temperature=0.0)
+    assert torch.equal(output, crop_output)
 
 
 def test_constructor_forces_eager_attention_on_loaded_checkpoint(tmp_path):

@@ -383,6 +383,7 @@ class HFDiffusionLM(HFLM):
                     "max_denoising_steps_per_block": (
                         self.max_denoising_steps_per_block
                     ),
+                    "cache_reset_mode": "reference_restore",
                     "trace_requests_per_rank": self.trace_requests_per_rank,
                     "trace_blocks_per_request": self.trace_blocks_per_request,
                     "diffusion_temperature": self.diffusion_temperature,
@@ -425,19 +426,63 @@ class HFDiffusionLM(HFLM):
         return [base + (index < remainder) for index in range(num_blocks)]
 
     @staticmethod
-    def _reset_denoise_cache(denoise_cache: Any, prefix_length: int) -> None:
-        """Discard the previous denoise block while retaining its causal prefix."""
-        crop = getattr(denoise_cache, "crop", None)
-        if not callable(crop):
-            raise RuntimeError(
-                "The model cache must provide crop() so one scratch cache can be "
-                "reused across denoising steps."
-            )
-        crop(prefix_length)
+    def _snapshot_denoise_prefix(
+        denoise_cache: Any, prefix_length: int
+    ) -> tuple[tuple[Any, Any, Any], ...]:
+        """Keep Python references to the immutable prefix tensors in each layer."""
         actual_length = denoise_cache.get_seq_length()
         if actual_length != prefix_length:
             raise RuntimeError(
-                "Could not reset denoising cache to its causal prefix: expected "
+                "Could not snapshot the denoising causal prefix: expected "
+                f"length {prefix_length}, found {actual_length}."
+            )
+        layers = getattr(denoise_cache, "layers", None)
+        if layers is None:
+            raise RuntimeError(
+                "The model cache must expose per-layer state through layers so "
+                "the denoising prefix can be restored without device kernels."
+            )
+        prefix_state = []
+        for layer_index, layer in enumerate(layers):
+            if not hasattr(layer, "keys") or not hasattr(layer, "values"):
+                raise RuntimeError(
+                    "Denoising cache layer "
+                    f"{layer_index} does not expose keys and values."
+                )
+            prefix_state.append(
+                (
+                    layer.keys,
+                    layer.values,
+                    getattr(layer, "cumulative_length", None),
+                )
+            )
+        return tuple(prefix_state)
+
+    @staticmethod
+    def _reset_denoise_cache(
+        denoise_cache: Any,
+        prefix_state: tuple[tuple[Any, Any, Any], ...],
+        prefix_length: int,
+    ) -> None:
+        """Restore prefix tensor references without slicing or copying KV data."""
+        layers = getattr(denoise_cache, "layers", None)
+        if layers is None or len(layers) != len(prefix_state):
+            actual_layers = None if layers is None else len(layers)
+            raise RuntimeError(
+                "Denoising cache layer count changed while reusing its scratch "
+                f"state: expected {len(prefix_state)}, found {actual_layers}."
+            )
+        for layer, (keys, values, cumulative_length) in zip(
+            layers, prefix_state, strict=True
+        ):
+            layer.keys = keys
+            layer.values = values
+            if cumulative_length is not None:
+                layer.cumulative_length = cumulative_length
+        actual_length = denoise_cache.get_seq_length()
+        if actual_length != prefix_length:
+            raise RuntimeError(
+                "Could not restore denoising cache to its causal prefix: expected "
                 f"length {prefix_length}, found {actual_length}."
             )
 
@@ -698,9 +743,11 @@ class HFDiffusionLM(HFLM):
                 }
 
             # The causal prefix is immutable during this block. Clone it once,
-            # then crop the scratch cache back to that prefix before every
-            # subsequent denoise instead of cloning all historical KV again.
+            # retain its per-layer tensor references, then restore those Python
+            # references before later denoises. Unlike Cache.crop(), restoring
+            # references does not dispatch Slice kernels on Ascend NPU.
             denoise_cache = None
+            denoise_prefix_state = None
             for step_index in range(steps_per_block[block_index]):
                 if not mutable.any():
                     break
@@ -708,10 +755,22 @@ class HFDiffusionLM(HFLM):
                 if denoise_cache is None:
                     with self._npu_operator_profiler.region("diffusion_cache_copy"):
                         denoise_cache = self._clone_denoise_cache(past_key_values)
+                    denoise_prefix_state = self._snapshot_denoise_prefix(
+                        denoise_cache, cache_length
+                    )
                     cache_deepcopy_count += 1
                 else:
+                    if denoise_prefix_state is None:
+                        raise RuntimeError(
+                            "Denoising prefix state is missing for scratch-cache "
+                            "reuse."
+                        )
                     with self._npu_operator_profiler.region("diffusion_cache_reset"):
-                        self._reset_denoise_cache(denoise_cache, cache_length)
+                        self._reset_denoise_cache(
+                            denoise_cache,
+                            denoise_prefix_state,
+                            cache_length,
+                        )
                     cache_reset_count += 1
                 with self._npu_operator_profiler.region(
                     "diffusion_denoise_forward"
