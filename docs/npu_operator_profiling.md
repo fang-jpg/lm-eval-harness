@@ -104,8 +104,12 @@ Check these hypotheses in order:
 2. **Query length.** AR decode has query length 1. Denoise and causal refresh
    have query length `B`, so projection, MLP, logits and attention operators do
    more work in every diffusion forward.
-3. **KV-cache copy.** `diffusion_cache_copy` identifies device copy kernels and
-   CPU gaps caused by `copy.deepcopy(past_key_values)` before every denoise.
+3. **KV-cache scratch reuse.** `diffusion_cache_copy` identifies the one
+   `copy.deepcopy(past_key_values)` used to initialize each block's scratch
+   cache. Later denoise steps crop that scratch cache back to the immutable
+   causal-prefix length under `diffusion_cache_reset`. Use the full
+   `diffusion_request` trace to verify that cumulative copy calls and time fall;
+   a single `diffusion_cache_copy` occurrence should cost roughly the same.
 4. **Full-vocabulary selection.** `diffusion_sample_and_select` exposes the
    `Softmax`, `ArgMax`, `TopK`, masking and indexing cost outside the transformer.
 5. **Host gaps.** Compare `Device busy ms` with `Trace span ms`. A low busy/span

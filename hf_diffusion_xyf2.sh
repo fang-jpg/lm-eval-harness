@@ -161,9 +161,9 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 # If the long-running inference succeeds but the final HCCL gather fails, the
 # next attempt reads these files and only recomputes genuinely missing samples.
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
-# Bump this whenever decoding semantics change so an otherwise identical run
-# cannot reuse responses produced by an older decoder implementation.
-DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-threshold-progress-v5}"
+# Bump this whenever decoding semantics or the timed execution path changes so
+# a benchmark cannot reuse responses produced by an older implementation.
+DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-scratch-cache-v6}"
 # Total attempts, including the first one.  A retry only computes responses
 # still missing from each rank-local cache, so an extra attempt is inexpensive
 # and covers a slow rank that needs more than one timeout window to catch up.

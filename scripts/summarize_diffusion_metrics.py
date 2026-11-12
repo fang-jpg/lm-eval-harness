@@ -79,6 +79,7 @@ def _write_summary(
     metrics_root: Path,
 ) -> None:
     forward_counts: Counter[str] = Counter()
+    cache_counts: Counter[str] = Counter()
     step_histogram: Counter[int] = Counter()
     steps_by_block_index: dict[int, list[int]] = defaultdict(list)
     generated_tokens = 0
@@ -94,6 +95,7 @@ def _write_summary(
 
     for payload in metrics:
         forward_counts.update(payload.get("forward_counts", {}))
+        cache_counts.update(payload.get("cache_counts", {}))
         generated_tokens += int(payload.get("raw_generated_tokens", 0))
         generation_requests += int(payload.get("generation_requests", 0))
         payload_decode_seconds = float(payload.get("decode_seconds", 0.0))
@@ -170,6 +172,14 @@ def _write_summary(
             output.write(f"{kind}_forward_count={forward_counts[kind]}\n")
         output.write(f"actual_forward_count={actual_forward_count}\n")
         output.write(f"decode_forward_count={decode_forward_count}\n")
+        output.write(f"cache_deepcopy_count={cache_counts['deepcopy']}\n")
+        output.write(f"cache_reset_count={cache_counts['reset']}\n")
+        output.write(
+            "cache_deepcopies_per_request="
+            f"{cache_counts['deepcopy'] / generation_requests:.6f}\n"
+            if generation_requests
+            else "cache_deepcopies_per_request=0.000000\n"
+        )
         output.write(
             "actual_forwards_per_request="
             f"{actual_forward_count / generation_requests:.6f}\n"
@@ -233,7 +243,8 @@ def _write_summary(
                     "generated_tokens={tokens} decode_seconds={seconds:.9f} "
                     "block_steps={steps} allocated_steps={allocated} "
                     "progress_fallback_tokens={progress} "
-                    "stalled_steps={stalled}\n".format(
+                    "stalled_steps={stalled} cache_deepcopies={copies} "
+                    "cache_resets={resets}\n".format(
                         file=relative_file.as_posix(),
                         rank=rank,
                         request_index=request.get("request_index", 0),
@@ -247,6 +258,8 @@ def _write_summary(
                             request.get("block_progress_fallback_tokens", [])
                         ),
                         stalled=json.dumps(request.get("block_stalled_steps", [])),
+                        copies=request.get("cache_deepcopy_count", 0),
+                        resets=request.get("cache_reset_count", 0),
                     )
                 )
 

@@ -259,12 +259,16 @@ class HFDiffusionLM(HFLM):
 
     def _new_perf_metrics(self) -> dict[str, Any]:
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "forward_counts": {
                 "prefill": 0,
                 "denoise": 0,
                 "causal": 0,
                 "scoring": 0,
+            },
+            "cache_counts": {
+                "deepcopy": 0,
+                "reset": 0,
             },
             "generation_requests": 0,
             "raw_generated_tokens": 0,
@@ -326,6 +330,8 @@ class HFDiffusionLM(HFLM):
         block_progress_fallback_tokens: list[int],
         block_stalled_steps: list[int],
         block_traces: list[dict[str, Any]],
+        cache_deepcopy_count: int,
+        cache_reset_count: int,
     ) -> None:
         metrics = getattr(self, "_perf_metrics", None)
         if metrics is None or not getattr(self, "_metrics_dir", None):
@@ -334,6 +340,8 @@ class HFDiffusionLM(HFLM):
         metrics["generation_requests"] += 1
         metrics["raw_generated_tokens"] += generated_tokens
         metrics["decode_seconds"] += decode_seconds
+        metrics["cache_counts"]["deepcopy"] += cache_deepcopy_count
+        metrics["cache_counts"]["reset"] += cache_reset_count
         metrics["requests"].append(
             {
                 "request_index": request_index,
@@ -344,6 +352,8 @@ class HFDiffusionLM(HFLM):
                 "block_progress_fallback_tokens": block_progress_fallback_tokens,
                 "block_stalled_steps": block_stalled_steps,
                 "block_traces": block_traces,
+                "cache_deepcopy_count": cache_deepcopy_count,
+                "cache_reset_count": cache_reset_count,
             }
         )
 
@@ -413,6 +423,27 @@ class HFDiffusionLM(HFLM):
             )
         base, remainder = divmod(total_steps, num_blocks)
         return [base + (index < remainder) for index in range(num_blocks)]
+
+    @staticmethod
+    def _reset_denoise_cache(denoise_cache: Any, prefix_length: int) -> None:
+        """Discard the previous denoise block while retaining its causal prefix."""
+        crop = getattr(denoise_cache, "crop", None)
+        if not callable(crop):
+            raise RuntimeError(
+                "The model cache must provide crop() so one scratch cache can be "
+                "reused across denoising steps."
+            )
+        crop(prefix_length)
+        actual_length = denoise_cache.get_seq_length()
+        if actual_length != prefix_length:
+            raise RuntimeError(
+                "Could not reset denoising cache to its causal prefix: expected "
+                f"length {prefix_length}, found {actual_length}."
+            )
+
+    @staticmethod
+    def _clone_denoise_cache(past_key_values: Any) -> Any:
+        return copy.deepcopy(past_key_values)
 
     def _filter_logits(self, logits: torch.Tensor) -> torch.Tensor:
         if self.top_k > 0:
@@ -608,6 +639,8 @@ class HFDiffusionLM(HFLM):
         block_progress_fallback_tokens = []
         block_stalled_steps = []
         block_traces = []
+        cache_deepcopy_count = 0
+        cache_reset_count = 0
         generated_output = None
         metrics = getattr(self, "_perf_metrics", None)
         request_index = metrics["generation_requests"] if metrics is not None else 0
@@ -664,12 +697,22 @@ class HFDiffusionLM(HFLM):
                     "steps": [],
                 }
 
+            # The causal prefix is immutable during this block. Clone it once,
+            # then crop the scratch cache back to that prefix before every
+            # subsequent denoise instead of cloning all historical KV again.
+            denoise_cache = None
             for step_index in range(steps_per_block[block_index]):
                 if not mutable.any():
                     break
                 mutable_before = mutable.clone()
-                with self._npu_operator_profiler.region("diffusion_cache_copy"):
-                    denoise_cache = copy.deepcopy(past_key_values)
+                if denoise_cache is None:
+                    with self._npu_operator_profiler.region("diffusion_cache_copy"):
+                        denoise_cache = self._clone_denoise_cache(past_key_values)
+                    cache_deepcopy_count += 1
+                else:
+                    with self._npu_operator_profiler.region("diffusion_cache_reset"):
+                        self._reset_denoise_cache(denoise_cache, cache_length)
+                    cache_reset_count += 1
                 with self._npu_operator_profiler.region(
                     "diffusion_denoise_forward"
                 ):
@@ -684,6 +727,7 @@ class HFDiffusionLM(HFLM):
                             use_cache=True,
                             return_dict=True,
                         )
+                denoise_cache = denoise.past_key_values
                 with self._npu_operator_profiler.region(
                     "diffusion_sample_and_select"
                 ):
@@ -822,6 +866,8 @@ class HFDiffusionLM(HFLM):
             block_progress_fallback_tokens=block_progress_fallback_tokens,
             block_stalled_steps=block_stalled_steps,
             block_traces=block_traces,
+            cache_deepcopy_count=cache_deepcopy_count,
+            cache_reset_count=cache_reset_count,
         )
         return generated_output
 

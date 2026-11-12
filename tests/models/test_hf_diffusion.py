@@ -294,7 +294,9 @@ def test_tiny_qwen3_records_threshold_generation_metrics():
     ]
 
 
-def test_strict_threshold_makes_one_token_progress_with_trace():
+def test_strict_threshold_reuses_one_scratch_cache_per_block_with_trace(
+    monkeypatch,
+):
     config = Qwen3Config(
         vocab_size=32,
         hidden_size=16,
@@ -325,12 +327,38 @@ def test_strict_threshold_makes_one_token_progress_with_trace():
     lm._metrics_dir = "enabled-for-test"
     lm._perf_metrics = lm._new_perf_metrics()
 
+    reset_calls = []
+    original_reset = lm._reset_denoise_cache
+    clone_calls = []
+    original_clone = lm._clone_denoise_cache
+
+    def record_clone(past_key_values):
+        clone_calls.append(past_key_values.get_seq_length())
+        return original_clone(past_key_values)
+
+    def record_reset(denoise_cache, prefix_length):
+        before = denoise_cache.get_seq_length()
+        original_reset(denoise_cache, prefix_length)
+        reset_calls.append(
+            (before, prefix_length, denoise_cache.get_seq_length())
+        )
+
+    monkeypatch.setattr(lm, "_clone_denoise_cache", record_clone)
+    monkeypatch.setattr(lm, "_reset_denoise_cache", record_reset)
+
     prompt = torch.tensor([[1, 4, 5]])
     output = lm._generate_one(prompt, max_new_tokens=6, temperature=0.0)
 
     assert output.shape == (1, 9)
     assert not output[:, prompt.shape[1] :].eq(lm.mask_token_id).any()
+    # Two denoise steps in each of two blocks now require two deep copies, not
+    # four. The second step in each block reuses and crops its scratch cache.
+    assert clone_calls == [3, 6]
+    assert reset_calls == [(6, 3, 3), (9, 6, 6)]
     request = lm._perf_metrics["requests"][0]
+    assert lm._perf_metrics["cache_counts"] == {"deepcopy": 2, "reset": 2}
+    assert request["cache_deepcopy_count"] == 2
+    assert request["cache_reset_count"] == 2
     assert request["block_steps"] == [2, 2]
     assert request["block_progress_fallback_tokens"] == [2, 2]
     assert request["block_stalled_steps"] == [2, 2]

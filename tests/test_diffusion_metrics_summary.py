@@ -26,6 +26,7 @@ def test_diffusion_summary_combines_accuracy_forwards_and_block_steps(tmp_path):
             "causal": 1,
             "scoring": 0,
         },
+        "cache_counts": {"deepcopy": 1, "reset": 2},
         "generation_requests": 1,
         "raw_generated_tokens": 4,
         "decode_seconds": 2.0,
@@ -40,6 +41,8 @@ def test_diffusion_summary_combines_accuracy_forwards_and_block_steps(tmp_path):
                 "block_allocated_steps": [3],
                 "block_progress_fallback_tokens": [1],
                 "block_stalled_steps": [1],
+                "cache_deepcopy_count": 1,
+                "cache_reset_count": 2,
                 "block_traces": [
                     {
                         "block_index": 0,
@@ -111,11 +114,15 @@ def test_diffusion_summary_combines_accuracy_forwards_and_block_steps(tmp_path):
     assert "results.boolq-seq2seq.exact_match=0.75" in summary
     assert "actual_forward_count=5" in summary
     assert "actual_forwards_per_request=5.000000" in summary
+    assert "cache_deepcopy_count=1" in summary
+    assert "cache_reset_count=2" in summary
+    assert "cache_deepcopies_per_request=1.000000" in summary
     assert "decode_tok_per_s_device_average=2.000000" in summary
     assert "peak_memory_allocated_gb_max_rank=3.000000" in summary
     assert "steps_histogram=3:1" in summary
     assert "block_steps=[3]" in summary
     assert "progress_fallback_tokens=[1]" in summary
+    assert "cache_deepcopies=1 cache_resets=2" in summary
     assert "[block_decode_probability_traces]" in summary
     assert "probability=0.85" in summary
     assert "trace_block_count=1" in summary
