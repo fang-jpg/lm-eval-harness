@@ -75,6 +75,7 @@ class HFDiffusionLM(HFLM):
         diffusion_temperature: float | str = 0.0,
         threshold: float | str = 0.0,
         threshold_mode: str = "scheduled",
+        denoise_cache_mode: str = "block_reference",
         max_denoising_steps_per_block: int | str | None = None,
         trace_requests_per_rank: int | str = 0,
         trace_blocks_per_request: int | str = 0,
@@ -98,6 +99,7 @@ class HFDiffusionLM(HFLM):
         self.diffusion_temperature = float(diffusion_temperature)
         self.threshold = float(threshold)
         self.threshold_mode = str(threshold_mode).strip().lower()
+        self.denoise_cache_mode = str(denoise_cache_mode).strip().lower()
         self.max_denoising_steps_per_block = _as_optional_int(
             max_denoising_steps_per_block
         )
@@ -157,12 +159,13 @@ class HFDiffusionLM(HFLM):
         eval_logger.info(
             "Initialized hf-diffusion: mask_token_id=%d, block_length=%d, "
             "diffusion_steps=%s, threshold=%.4f, threshold_mode=%s, "
-            "max_denoising_steps_per_block=%s, mc_num=%d",
+            "denoise_cache_mode=%s, max_denoising_steps_per_block=%s, mc_num=%d",
             self.mask_token_id,
             self.block_length,
             self.diffusion_steps,
             self.threshold,
             self.threshold_mode,
+            self.denoise_cache_mode,
             self.max_denoising_steps_per_block,
             self.mc_num,
         )
@@ -186,6 +189,15 @@ class HFDiffusionLM(HFLM):
             raise ValueError("threshold must be in [0, 1].")
         if self.threshold_mode not in {"scheduled", "strict"}:
             raise ValueError("threshold_mode must be 'scheduled' or 'strict'.")
+        if self.denoise_cache_mode not in {
+            "per_step_deepcopy",
+            "block_crop",
+            "block_reference",
+        }:
+            raise ValueError(
+                "denoise_cache_mode must be 'per_step_deepcopy', 'block_crop', "
+                "or 'block_reference'."
+            )
         if self.max_denoising_steps_per_block is not None:
             if self.max_denoising_steps_per_block <= 0:
                 raise ValueError(
@@ -383,7 +395,7 @@ class HFDiffusionLM(HFLM):
                     "max_denoising_steps_per_block": (
                         self.max_denoising_steps_per_block
                     ),
-                    "cache_reset_mode": "reference_restore",
+                    "denoise_cache_mode": self.denoise_cache_mode,
                     "trace_requests_per_rank": self.trace_requests_per_rank,
                     "trace_blocks_per_request": self.trace_blocks_per_request,
                     "diffusion_temperature": self.diffusion_temperature,
@@ -483,6 +495,22 @@ class HFDiffusionLM(HFLM):
         if actual_length != prefix_length:
             raise RuntimeError(
                 "Could not restore denoising cache to its causal prefix: expected "
+                f"length {prefix_length}, found {actual_length}."
+            )
+
+    @staticmethod
+    def _crop_denoise_cache(denoise_cache: Any, prefix_length: int) -> None:
+        """Restore the prefix with DynamicCache.crop for the crop ablation."""
+        crop = getattr(denoise_cache, "crop", None)
+        if not callable(crop):
+            raise RuntimeError(
+                "The model cache must provide crop() for block_crop mode."
+            )
+        crop(prefix_length)
+        actual_length = denoise_cache.get_seq_length()
+        if actual_length != prefix_length:
+            raise RuntimeError(
+                "Could not crop denoising cache to its causal prefix: expected "
                 f"length {prefix_length}, found {actual_length}."
             )
 
@@ -742,35 +770,44 @@ class HFDiffusionLM(HFLM):
                     "steps": [],
                 }
 
-            # The causal prefix is immutable during this block. Clone it once,
-            # retain its per-layer tensor references, then restore those Python
-            # references before later denoises. Unlike Cache.crop(), restoring
-            # references does not dispatch Slice kernels on Ascend NPU.
+            # Cache policy is an explicit ablation variable. The original path
+            # clones the persistent prefix before every denoise; optimized paths
+            # clone once per block and reset by crop or Python reference restore.
             denoise_cache = None
             denoise_prefix_state = None
             for step_index in range(steps_per_block[block_index]):
                 if not mutable.any():
                     break
                 mutable_before = mutable.clone()
-                if denoise_cache is None:
+                if self.denoise_cache_mode == "per_step_deepcopy":
                     with self._npu_operator_profiler.region("diffusion_cache_copy"):
                         denoise_cache = self._clone_denoise_cache(past_key_values)
-                    denoise_prefix_state = self._snapshot_denoise_prefix(
-                        denoise_cache, cache_length
-                    )
+                    cache_deepcopy_count += 1
+                elif denoise_cache is None:
+                    with self._npu_operator_profiler.region("diffusion_cache_copy"):
+                        denoise_cache = self._clone_denoise_cache(past_key_values)
+                    if self.denoise_cache_mode == "block_reference":
+                        denoise_prefix_state = self._snapshot_denoise_prefix(
+                            denoise_cache, cache_length
+                        )
                     cache_deepcopy_count += 1
                 else:
-                    if denoise_prefix_state is None:
-                        raise RuntimeError(
-                            "Denoising prefix state is missing for scratch-cache "
-                            "reuse."
-                        )
                     with self._npu_operator_profiler.region("diffusion_cache_reset"):
-                        self._reset_denoise_cache(
-                            denoise_cache,
-                            denoise_prefix_state,
-                            cache_length,
-                        )
+                        if self.denoise_cache_mode == "block_crop":
+                            self._crop_denoise_cache(
+                                denoise_cache, cache_length
+                            )
+                        else:
+                            if denoise_prefix_state is None:
+                                raise RuntimeError(
+                                    "Denoising prefix state is missing for "
+                                    "block_reference mode."
+                                )
+                            self._reset_denoise_cache(
+                                denoise_cache,
+                                denoise_prefix_state,
+                                cache_length,
+                            )
                     cache_reset_count += 1
                 with self._npu_operator_profiler.region(
                     "diffusion_denoise_forward"

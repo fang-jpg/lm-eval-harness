@@ -59,6 +59,7 @@ def _make_lm(model, *, mc_num=8, mc_batch_size=4):
     lm.check_greedy = True
     lm.ignore_eos = False
     lm.threshold_mode = "scheduled"
+    lm.denoise_cache_mode = "block_reference"
     lm.max_denoising_steps_per_block = None
     lm.trace_requests_per_rank = 0
     lm.trace_blocks_per_request = 0
@@ -83,6 +84,7 @@ def test_strict_threshold_requires_enough_steps_for_one_token_progress():
     lm.diffusion_temperature = 0.0
     lm.threshold = 0.8
     lm.threshold_mode = "strict"
+    lm.denoise_cache_mode = "block_reference"
     lm.max_denoising_steps_per_block = 6
     lm.trace_requests_per_rank = 0
     lm.trace_blocks_per_request = 0
@@ -96,6 +98,10 @@ def test_strict_threshold_requires_enough_steps_for_one_token_progress():
 
     lm.max_denoising_steps_per_block = 7
     lm._validate_diffusion_args()
+
+    lm.denoise_cache_mode = "invalid"
+    with pytest.raises(ValueError, match="denoise_cache_mode"):
+        lm._validate_diffusion_args()
 
 
 def test_threshold_accepts_only_confident_tokens_before_final_step():
@@ -396,6 +402,15 @@ def test_strict_threshold_reuses_one_scratch_cache_per_block_with_trace(
     lm._perf_metrics = lm._new_perf_metrics()
     crop_output = lm._generate_one(prompt, max_new_tokens=6, temperature=0.0)
     assert torch.equal(output, crop_output)
+
+    # The original ablation clones the persistent prefix before every denoise.
+    lm.denoise_cache_mode = "per_step_deepcopy"
+    lm._perf_metrics = lm._new_perf_metrics()
+    clone_calls.clear()
+    baseline_output = lm._generate_one(prompt, max_new_tokens=6, temperature=0.0)
+    assert clone_calls == [3, 3, 6, 6]
+    assert lm._perf_metrics["cache_counts"] == {"deepcopy": 4, "reset": 0}
+    assert torch.equal(output, baseline_output)
 
 
 def test_constructor_forces_eager_attention_on_loaded_checkpoint(tmp_path):

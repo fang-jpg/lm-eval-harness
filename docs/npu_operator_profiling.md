@@ -14,6 +14,7 @@ PROFILE_DEVICE=0 \
 BLOCK_LENGTH=4 \
 THRESHOLD=0.8 \
 THRESHOLD_MODE=strict \
+DENOISE_CACHE_MODE=block_reference \
 MAX_DENOISING_STEPS_PER_BLOCK=3 \
 bash profile_ar_diffusion_operators.sh
 ```
@@ -25,14 +26,15 @@ request traces, which provide the per-operator total-time comparison:
 - `ar_request`
 - `diffusion_request`
 
-It then captures six bounded stage traces (most near generated token 128), which
-explain the per-call cost:
+It then captures up to six bounded stage traces (most near generated token
+128), which explain the per-call cost. The reset trace is omitted for the
+`per_step_deepcopy` baseline because that path has no reset:
 
 - `ar_decode_forward`
 - `diffusion_denoise_forward`
 - `diffusion_causal_refresh_forward`
 - `diffusion_cache_copy`
-- `diffusion_cache_reset` (first occurrence; expected to launch no NPU kernel)
+- `diffusion_cache_reset` (first occurrence; zero-kernel only in reference mode)
 - `diffusion_sample_and_select`
 
 Every target is run in a fresh process and with a fresh response-cache path.
@@ -82,6 +84,15 @@ Both `hf_xyf2.sh` and `hf_diffusion_xyf2.sh` accept these environment variables:
 | `HF_NPU_PROFILE_LEVEL` | `level0`, `level1`, or `level2` | `level1` |
 | `HF_NPU_PROFILE_WITH_CPU` | Include CPU events/markers | `1` |
 | `HF_NPU_PROFILE_RECORD_SHAPES` | Record tensor shapes | `1` |
+
+`DENOISE_CACHE_MODE` selects the KV-cache ablation while keeping the rest of
+the decoder identical:
+
+| Value | Behavior |
+|---|---|
+| `per_step_deepcopy` | Original baseline: deep-copy the full persistent KV before every denoise |
+| `block_crop` | Clone once per block, then reset with `DynamicCache.crop()` |
+| `block_reference` | Clone once per block, then restore saved prefix Tensor references |
 
 Request scope captures cumulative behavior but a 256-token trace can be very
 large:

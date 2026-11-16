@@ -27,6 +27,7 @@ fi
 BLOCK_LENGTH="${BLOCK_LENGTH:-4}"
 THRESHOLD="${THRESHOLD:-0.8}"
 THRESHOLD_MODE="${THRESHOLD_MODE:-strict}"
+DENOISE_CACHE_MODE="${DENOISE_CACHE_MODE:-block_reference}"
 MAX_DENOISING_STEPS_PER_BLOCK="${MAX_DENOISING_STEPS_PER_BLOCK:-$((BLOCK_LENGTH - 1))}"
 if [[ "${THRESHOLD_MODE}" != "strict" ]]; then
   MAX_DENOISING_STEPS_PER_BLOCK=""
@@ -38,10 +39,23 @@ fi
 AR_DECODE_OCCURRENCE="${AR_DECODE_OCCURRENCE:-127}"
 DIFFUSION_DENOISE_OCCURRENCE="${DIFFUSION_DENOISE_OCCURRENCE:-56}"
 DIFFUSION_REFRESH_OCCURRENCE="${DIFFUSION_REFRESH_OCCURRENCE:-31}"
-# Cache copies now occur once per block, so block 32 is near generated token 128.
-DIFFUSION_CACHE_COPY_OCCURRENCE="${DIFFUSION_CACHE_COPY_OCCURRENCE:-31}"
-# The first reset is sufficient to verify that reference restoration launches
-# no NPU Slice/TensorMove kernel and avoids assumptions about denoise counts.
+# Match the cache-copy occurrence to approximately generated token 128 in each
+# ablation: per denoise in the baseline, once per block in optimized modes.
+case "${DENOISE_CACHE_MODE}" in
+  per_step_deepcopy)
+    DEFAULT_CACHE_COPY_OCCURRENCE=56
+    ;;
+  block_crop|block_reference)
+    DEFAULT_CACHE_COPY_OCCURRENCE=31
+    ;;
+  *)
+    echo "DENOISE_CACHE_MODE must be per_step_deepcopy, block_crop, or block_reference: ${DENOISE_CACHE_MODE}" >&2
+    exit 2
+    ;;
+esac
+DIFFUSION_CACHE_COPY_OCCURRENCE="${DIFFUSION_CACHE_COPY_OCCURRENCE:-${DEFAULT_CACHE_COPY_OCCURRENCE}}"
+# The first reset avoids assumptions about denoise counts. Reference mode should
+# launch no NPU kernel; crop mode intentionally exposes its Slice kernels.
 DIFFUSION_CACHE_RESET_OCCURRENCE="${DIFFUSION_CACHE_RESET_OCCURRENCE:-0}"
 DIFFUSION_SAMPLE_OCCURRENCE="${DIFFUSION_SAMPLE_OCCURRENCE:-56}"
 
@@ -105,6 +119,7 @@ run_diffusion_profile() {
   BLOCK_LENGTH="${BLOCK_LENGTH}" \
   THRESHOLD="${THRESHOLD}" \
   THRESHOLD_MODE="${THRESHOLD_MODE}" \
+  DENOISE_CACHE_MODE="${DENOISE_CACHE_MODE}" \
   MAX_DENOISING_STEPS_PER_BLOCK="${MAX_DENOISING_STEPS_PER_BLOCK}" \
   IGNORE_EOS="${PROFILE_IGNORE_EOS}" \
   NPU_PROFILE=1 \
@@ -132,6 +147,7 @@ run_diffusion_request_profile() {
   BLOCK_LENGTH="${BLOCK_LENGTH}" \
   THRESHOLD="${THRESHOLD}" \
   THRESHOLD_MODE="${THRESHOLD_MODE}" \
+  DENOISE_CACHE_MODE="${DENOISE_CACHE_MODE}" \
   MAX_DENOISING_STEPS_PER_BLOCK="${MAX_DENOISING_STEPS_PER_BLOCK}" \
   IGNORE_EOS="${PROFILE_IGNORE_EOS}" \
   NPU_PROFILE=1 \
@@ -158,16 +174,22 @@ if [[ "${RUN_STAGE_PROFILES}" == "1" ]]; then
   run_diffusion_profile diffusion_denoise_forward "${DIFFUSION_DENOISE_OCCURRENCE}" diffusion_denoise
   run_diffusion_profile diffusion_causal_refresh_forward "${DIFFUSION_REFRESH_OCCURRENCE}" diffusion_refresh
   run_diffusion_profile diffusion_cache_copy "${DIFFUSION_CACHE_COPY_OCCURRENCE}" diffusion_cache_copy
-  run_diffusion_profile diffusion_cache_reset "${DIFFUSION_CACHE_RESET_OCCURRENCE}" diffusion_cache_reset
+  if [[ "${DENOISE_CACHE_MODE}" != "per_step_deepcopy" ]]; then
+    run_diffusion_profile diffusion_cache_reset "${DIFFUSION_CACHE_RESET_OCCURRENCE}" diffusion_cache_reset
+  fi
   run_diffusion_profile diffusion_sample_and_select "${DIFFUSION_SAMPLE_OCCURRENCE}" diffusion_sample
   SUMMARY_ARGS+=(
     --profile "ar_decode=${PROFILE_ROOT}/ar_decode/trace"
     --profile "diffusion_denoise=${PROFILE_ROOT}/diffusion_denoise/trace"
     --profile "diffusion_refresh=${PROFILE_ROOT}/diffusion_refresh/trace"
     --profile "diffusion_cache_copy=${PROFILE_ROOT}/diffusion_cache_copy/trace"
-    --profile "diffusion_cache_reset=${PROFILE_ROOT}/diffusion_cache_reset/trace"
     --profile "diffusion_sample=${PROFILE_ROOT}/diffusion_sample/trace"
   )
+  if [[ "${DENOISE_CACHE_MODE}" != "per_step_deepcopy" ]]; then
+    SUMMARY_ARGS+=(
+      --profile "diffusion_cache_reset=${PROFILE_ROOT}/diffusion_cache_reset/trace"
+    )
+  fi
 fi
 
 if (( ${#SUMMARY_ARGS[@]} == 0 )); then

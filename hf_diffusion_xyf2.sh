@@ -143,6 +143,9 @@ THRESHOLD="${THRESHOLD:-0.0}"
 # strict: accept every token that reaches THRESHOLD. If none does, accept only
 # the most confident token so the next forward sees updated block context.
 THRESHOLD_MODE="${THRESHOLD_MODE:-scheduled}"
+# per_step_deepcopy: original baseline, clone the full persistent KV before
+# every denoise. block_crop and block_reference are the two optimized variants.
+DENOISE_CACHE_MODE="${DENOISE_CACHE_MODE:-block_reference}"
 MAX_DENOISING_STEPS_PER_BLOCK="${MAX_DENOISING_STEPS_PER_BLOCK:-}"
 # Probability traces are intentionally bounded because a full GSM8K trace is
 # very large. These limits apply independently on every rank.
@@ -163,7 +166,7 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
 # Bump this whenever decoding semantics or the timed execution path changes so
 # a benchmark cannot reuse responses produced by an older implementation.
-DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-reference-reset-v7}"
+DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-cache-ablation-v8}"
 # Total attempts, including the first one.  A retry only computes responses
 # still missing from each rank-local cache, so an extra attempt is inexpensive
 # and covers a slow rank that needs more than one timeout window to catch up.
@@ -192,7 +195,7 @@ try:
     torch.npu.synchronize()
 except Exception as exc:
     raise SystemExit(
-        "[CANN] NPU Cast self-check failed although a 910B kernel index exists. "
+        "[CANN] NPU Cast self-check failed. "
         "Check CANN_OPP_PATH, file permissions, and the CANN/torch_npu version match.\n"
         f"Original error: {exc}"
     ) from exc
@@ -236,6 +239,12 @@ if [[ "${THRESHOLD_MODE}" != "scheduled" && "${THRESHOLD_MODE}" != "strict" ]]; 
   echo "THRESHOLD_MODE must be scheduled or strict: ${THRESHOLD_MODE}" >&2
   exit 2
 fi
+if [[ "${DENOISE_CACHE_MODE}" != "per_step_deepcopy" && \
+      "${DENOISE_CACHE_MODE}" != "block_crop" && \
+      "${DENOISE_CACHE_MODE}" != "block_reference" ]]; then
+  echo "DENOISE_CACHE_MODE must be per_step_deepcopy, block_crop, or block_reference: ${DENOISE_CACHE_MODE}" >&2
+  exit 2
+fi
 if ! [[ "${TRACE_REQUESTS_PER_RANK}" =~ ^[0-9]+$ && "${TRACE_BLOCKS_PER_REQUEST}" =~ ^[0-9]+$ ]]; then
   echo "TRACE_REQUESTS_PER_RANK and TRACE_BLOCKS_PER_REQUEST must be non-negative integers." >&2
   exit 2
@@ -256,7 +265,7 @@ if [[ "${THRESHOLD_MODE}" == "strict" ]]; then
   fi
 fi
 
-MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},ignore_eos=${IGNORE_EOS},threshold=${THRESHOLD},threshold_mode=${THRESHOLD_MODE},trace_requests_per_rank=${TRACE_REQUESTS_PER_RANK},trace_blocks_per_request=${TRACE_BLOCKS_PER_REQUEST},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
+MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},ignore_eos=${IGNORE_EOS},threshold=${THRESHOLD},threshold_mode=${THRESHOLD_MODE},denoise_cache_mode=${DENOISE_CACHE_MODE},trace_requests_per_rank=${TRACE_REQUESTS_PER_RANK},trace_blocks_per_request=${TRACE_BLOCKS_PER_REQUEST},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
 if [[ -n "${DIFFUSION_STEPS}" ]]; then
   MODEL_ARGS+=",diffusion_steps=${DIFFUSION_STEPS}"
 fi
@@ -329,6 +338,7 @@ run_task() {
   echo "Threshold  : ${THRESHOLD}"
   echo "Ignore EOS : ${IGNORE_EOS}"
   echo "Thresh mode: ${THRESHOLD_MODE}"
+  echo "Cache mode : ${DENOISE_CACHE_MODE}"
   echo "Max steps/B: ${MAX_DENOISING_STEPS_PER_BLOCK:-n/a}"
   echo "Trace      : ${TRACE_REQUESTS_PER_RANK} request(s)/rank, ${TRACE_BLOCKS_PER_REQUEST} block(s)/request"
   echo "Log file   : ${log_file}"
