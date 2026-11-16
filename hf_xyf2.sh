@@ -5,94 +5,94 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 
-# ============================================================
-# 1. Explicitly initialize CANN 9.1 for Ascend 910B
-# ============================================================
+# # ============================================================
+# # 1. Explicitly initialize CANN 9.1 for Ascend 910B
+# # ============================================================
 
-export CANN_ROOT="/share/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
-export CANN_ENV="${CANN_ROOT}/set_env.sh"
-export CANN_OPP_PATH="${CANN_ROOT}/opp"
+# export CANN_ROOT="/share/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
+# export CANN_ENV="${CANN_ROOT}/set_env.sh"
+# export CANN_OPP_PATH="${CANN_ROOT}/opp"
 export PYTHON_BIN="${PYTHON_BIN:-python}"
 
-if [[ ! -f "${CANN_ENV}" ]]; then
-    echo "[ERROR] CANN set_env.sh not found: ${CANN_ENV}" >&2
-    exit 2
-fi
+# if [[ ! -f "${CANN_ENV}" ]]; then
+#     echo "[ERROR] CANN set_env.sh not found: ${CANN_ENV}" >&2
+#     exit 2
+# fi
 
-if [[ ! -d "${CANN_OPP_PATH}" ]]; then
-    echo "[ERROR] CANN OPP directory not found: ${CANN_OPP_PATH}" >&2
-    exit 2
-fi
+# if [[ ! -d "${CANN_OPP_PATH}" ]]; then
+#     echo "[ERROR] CANN OPP directory not found: ${CANN_OPP_PATH}" >&2
+#     exit 2
+# fi
 
-# Avoid mixing old CANN toolkit libraries with CANN 9.1.
-# Retain non-CANN library paths and Ascend driver libraries.
-clean_cann_path() {
-    local value="${1:-}"
-    local entry
-    local result=""
-    local -a entries=()
+# # Avoid mixing old CANN toolkit libraries with CANN 9.1.
+# # Retain non-CANN library paths and Ascend driver libraries.
+# clean_cann_path() {
+#     local value="${1:-}"
+#     local entry
+#     local result=""
+#     local -a entries=()
 
-    IFS=':' read -r -a entries <<< "${value}"
+#     IFS=':' read -r -a entries <<< "${value}"
 
-    for entry in "${entries[@]}"; do
-        [[ -z "${entry}" ]] && continue
+#     for entry in "${entries[@]}"; do
+#         [[ -z "${entry}" ]] && continue
 
-        case "${entry}" in
-            *Ascend910B_CANN_*|*Ascend910C_CANN_*|\
-            */Ascend/cann-*|*/Ascend/cann-*/*|\
-            */ascend-toolkit/*|*/ascend-toolkit|\
-            */ascend/ascend-toolkit/*|*/ascend/ascend-toolkit)
-                continue
-                ;;
-        esac
+#         case "${entry}" in
+#             *Ascend910B_CANN_*|*Ascend910C_CANN_*|\
+#             */Ascend/cann-*|*/Ascend/cann-*/*|\
+#             */ascend-toolkit/*|*/ascend-toolkit|\
+#             */ascend/ascend-toolkit/*|*/ascend/ascend-toolkit)
+#                 continue
+#                 ;;
+#         esac
 
-        if [[ -z "${result}" ]]; then
-            result="${entry}"
-        else
-            result="${result}:${entry}"
-        fi
-    done
+#         if [[ -z "${result}" ]]; then
+#             result="${entry}"
+#         else
+#             result="${result}:${entry}"
+#         fi
+#     done
 
-    printf '%s' "${result}"
-}
+#     printf '%s' "${result}"
+# }
 
-export LD_LIBRARY_PATH="$(clean_cann_path "${LD_LIBRARY_PATH:-}")"
-export PYTHONPATH="$(clean_cann_path "${PYTHONPATH:-}")"
+# export LD_LIBRARY_PATH="$(clean_cann_path "${LD_LIBRARY_PATH:-}")"
+# export PYTHONPATH="$(clean_cann_path "${PYTHONPATH:-}")"
 
-export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+# export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
 
-echo "[CANN] Loading ${CANN_ENV}"
+# echo "[CANN] Loading ${CANN_ENV}"
 
-# The vendor script may use optional environment probes.
-# Restore strict error handling immediately afterwards.
-set +e
-set +u
-source "${CANN_ENV}"
-CANN_SOURCE_STATUS=$?
-set -eo pipefail
+# # The vendor script may use optional environment probes.
+# # Restore strict error handling immediately afterwards.
+# set +e
+# set +u
+# source "${CANN_ENV}"
+# CANN_SOURCE_STATUS=$?
+# set -eo pipefail
 
-if [[ ${CANN_SOURCE_STATUS} -ne 0 ]]; then
-    echo "[WARN] CANN initialization returned ${CANN_SOURCE_STATUS}" >&2
-fi
+# if [[ ${CANN_SOURCE_STATUS} -ne 0 ]]; then
+#     echo "[WARN] CANN initialization returned ${CANN_SOURCE_STATUS}" >&2
+# fi
 
-# Override potentially stale values from a copied set_env.sh.
-export ASCEND_HOME_PATH="${CANN_ROOT}"
-export ASCEND_TOOLKIT_HOME="${CANN_ROOT}"
-export ASCEND_OPP_PATH="${CANN_OPP_PATH}"
+# # Override potentially stale values from a copied set_env.sh.
+# export ASCEND_HOME_PATH="${CANN_ROOT}"
+# export ASCEND_TOOLKIT_HOME="${CANN_ROOT}"
+# export ASCEND_OPP_PATH="${CANN_OPP_PATH}"
 
-echo "===== CANN environment ====="
-echo "CANN_ROOT=${CANN_ROOT}"
-echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
-echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
-echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+# echo "===== CANN environment ====="
+# echo "CANN_ROOT=${CANN_ROOT}"
+# echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
+# echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
+# echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
 
-# Optional existing project-specific OPP kernel verification.
-if [[ -f "${SCRIPT_DIR}/scripts/find_working_cann.py" ]]; then
-    "${PYTHON_BIN}" \
-        "${SCRIPT_DIR}/scripts/find_working_cann.py" \
-        --check-opp "${ASCEND_OPP_PATH}" \
-        || exit 2
-fi
+# # Optional existing project-specific OPP kernel verification.
+# if [[ -f "${SCRIPT_DIR}/scripts/find_working_cann.py" ]]; then
+#     "${PYTHON_BIN}" \
+#         "${SCRIPT_DIR}/scripts/find_working_cann.py" \
+#         --check-opp "${ASCEND_OPP_PATH}" \
+#         || exit 2
+# fi
 
 # ============================================================
 # 2. Verify PyTorch / torch_npu / basic Cast operation

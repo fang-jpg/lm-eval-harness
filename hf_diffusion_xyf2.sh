@@ -9,103 +9,103 @@ set -eo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-# Verified CANN 9.1 toolkit and 910B operator package on this server.  Assign
-# these explicitly so stale CANN 8.5 variables in the parent shell cannot win.
-export CANN_ROOT="/share/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
-export CANN_ENV="${CANN_ROOT}/set_env.sh"
-export CANN_OPP_PATH="${CANN_ROOT}/opp"
+# # Verified CANN 9.1 toolkit and 910B operator package on this server.  Assign
+# # these explicitly so stale CANN 8.5 variables in the parent shell cannot win.
+# export CANN_ROOT="/share/f50058111/Ascend910B_CANN_9.1.0/cann-9.1.0"
+# export CANN_ENV="${CANN_ROOT}/set_env.sh"
+# export CANN_OPP_PATH="${CANN_ROOT}/opp"
 
-if [[ -n "${CANN_ENV}" ]]; then
-  if [[ ! -f "${CANN_ENV}" ]]; then
-    echo "[CANN] CANN_ENV does not exist: ${CANN_ENV}" >&2
-    exit 2
-  fi
-  echo "[CANN] Loading ${CANN_ENV}"
-  # Vendor activation scripts can reference unset variables or return nonzero
-  # from optional probes.  The real NPU Cast check below is authoritative.
-  set +e
-  set +u
-  export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
-  # shellcheck disable=SC1090
-  source "${CANN_ENV}"
-else
-  echo "[CANN] Reusing the runtime environment used by hf_xyf2.sh."
-fi
-SOURCED_CANN_ROOT="${ASCEND_HOME_PATH:-}"
-set -euo pipefail
+# if [[ -n "${CANN_ENV}" ]]; then
+#   if [[ ! -f "${CANN_ENV}" ]]; then
+#     echo "[CANN] CANN_ENV does not exist: ${CANN_ENV}" >&2
+#     exit 2
+#   fi
+#   echo "[CANN] Loading ${CANN_ENV}"
+#   # Vendor activation scripts can reference unset variables or return nonzero
+#   # from optional probes.  The real NPU Cast check below is authoritative.
+#   set +e
+#   set +u
+#   export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+#   # shellcheck disable=SC1090
+#   source "${CANN_ENV}"
+# else
+#   echo "[CANN] Reusing the runtime environment used by hf_xyf2.sh."
+# fi
+# SOURCED_CANN_ROOT="${ASCEND_HOME_PATH:-}"
+# set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
-# A copied set_env.sh can export absolute paths from its source server. Rebase
-# all standard path variables and ASCEND_* variables onto the actual local
-# CANN root before importing torch_npu. The copied files are not modified.
-if [[ -n "${CANN_ROOT}" ]]; then
-  if [[ ! -d "${CANN_ROOT}" ]]; then
-    echo "[CANN] CANN_ROOT does not exist on this server: ${CANN_ROOT}" >&2
-    exit 2
-  fi
-  if [[ -n "${SOURCED_CANN_ROOT}" && "${SOURCED_CANN_ROOT}" != "${CANN_ROOT}" ]]; then
-    rebase_cann_variable() {
-      local variable_name="$1"
-      local old_value="${!variable_name:-}"
-      if [[ "${old_value}" == *"${SOURCED_CANN_ROOT}"* ]]; then
-        printf -v "${variable_name}" '%s' \
-          "${old_value//${SOURCED_CANN_ROOT}/${CANN_ROOT}}"
-        export "${variable_name}"
-      fi
-    }
-    while IFS= read -r variable_name; do
-      rebase_cann_variable "${variable_name}"
-    done < <(compgen -e)
-    echo "[CANN] Relocated environment: ${SOURCED_CANN_ROOT} -> ${CANN_ROOT}"
-  fi
-  export ASCEND_HOME_PATH="${CANN_ROOT}"
-  export ASCEND_TOOLKIT_HOME="${CANN_ROOT}"
-fi
+# # A copied set_env.sh can export absolute paths from its source server. Rebase
+# # all standard path variables and ASCEND_* variables onto the actual local
+# # CANN root before importing torch_npu. The copied files are not modified.
+# if [[ -n "${CANN_ROOT}" ]]; then
+#   if [[ ! -d "${CANN_ROOT}" ]]; then
+#     echo "[CANN] CANN_ROOT does not exist on this server: ${CANN_ROOT}" >&2
+#     exit 2
+#   fi
+#   if [[ -n "${SOURCED_CANN_ROOT}" && "${SOURCED_CANN_ROOT}" != "${CANN_ROOT}" ]]; then
+#     rebase_cann_variable() {
+#       local variable_name="$1"
+#       local old_value="${!variable_name:-}"
+#       if [[ "${old_value}" == *"${SOURCED_CANN_ROOT}"* ]]; then
+#         printf -v "${variable_name}" '%s' \
+#           "${old_value//${SOURCED_CANN_ROOT}/${CANN_ROOT}}"
+#         export "${variable_name}"
+#       fi
+#     }
+#     while IFS= read -r variable_name; do
+#       rebase_cann_variable "${variable_name}"
+#     done < <(compgen -e)
+#     echo "[CANN] Relocated environment: ${SOURCED_CANN_ROOT} -> ${CANN_ROOT}"
+#   fi
+#   export ASCEND_HOME_PATH="${CANN_ROOT}"
+#   export ASCEND_TOOLKIT_HOME="${CANN_ROOT}"
+# fi
 
-if [[ -n "${CANN_OPP_PATH}" ]]; then
-  export ASCEND_OPP_PATH="${CANN_OPP_PATH%/}"
-fi
+# if [[ -n "${CANN_OPP_PATH}" ]]; then
+#   export ASCEND_OPP_PATH="${CANN_OPP_PATH%/}"
+# fi
 
-if [[ -z "${ASCEND_OPP_PATH:-}" ]]; then
-  cat >&2 <<'EOF'
-[CANN] ASCEND_OPP_PATH is empty.
-[CANN] Locate the copied 910B operator package, then rerun with:
-[CANN]   CANN_OPP_PATH=/actual/path/to/opp bash hf_diffusion_xyf2.sh
-EOF
-  exit 2
-fi
+# if [[ -z "${ASCEND_OPP_PATH:-}" ]]; then
+#   cat >&2 <<'EOF'
+# [CANN] ASCEND_OPP_PATH is empty.
+# [CANN] Locate the copied 910B operator package, then rerun with:
+# [CANN]   CANN_OPP_PATH=/actual/path/to/opp bash hf_diffusion_xyf2.sh
+# EOF
+#   exit 2
+# fi
 
-if [[ ! -d "${ASCEND_OPP_PATH}" ]]; then
-  echo "[CANN] ASCEND_OPP_PATH does not exist on this server: ${ASCEND_OPP_PATH}" >&2
-  echo "[CANN] Set CANN_OPP_PATH to the copied package's real opp directory." >&2
-  exit 2
-fi
+# if [[ ! -d "${ASCEND_OPP_PATH}" ]]; then
+#   echo "[CANN] ASCEND_OPP_PATH does not exist on this server: ${ASCEND_OPP_PATH}" >&2
+#   echo "[CANN] Set CANN_OPP_PATH to the copied package's real opp directory." >&2
+#   exit 2
+# fi
 
-# Older kernel packages have one JSON per op; newer packages use a full kernel
-# index.  The checker verifies that a full index actually mentions Cast; an
-# unrelated ops_oam index is not sufficient.
-if ! KERNEL_INDEX="$("${PYTHON_BIN}" \
-  "${SCRIPT_DIR}/scripts/find_working_cann.py" \
-  --check-opp "${ASCEND_OPP_PATH}")"; then
-  echo "[CANN] This is not the correct opp root, or its 910B kernels package is incomplete." >&2
-  echo "[CANN] Run: ${PYTHON_BIN} scripts/find_working_cann.py" >&2
-  exit 2
-fi
+# # Older kernel packages have one JSON per op; newer packages use a full kernel
+# # index.  The checker verifies that a full index actually mentions Cast; an
+# # unrelated ops_oam index is not sufficient.
+# if ! KERNEL_INDEX="$("${PYTHON_BIN}" \
+#   "${SCRIPT_DIR}/scripts/find_working_cann.py" \
+#   --check-opp "${ASCEND_OPP_PATH}")"; then
+#   echo "[CANN] This is not the correct opp root, or its 910B kernels package is incomplete." >&2
+#   echo "[CANN] Run: ${PYTHON_BIN} scripts/find_working_cann.py" >&2
+#   exit 2
+# fi
 
-echo "===== CANN environment ====="
-echo "CANN_ENV=${CANN_ENV}"
-echo "CANN_ROOT=${CANN_ROOT}"
-echo "CANN_OPP_PATH=${CANN_OPP_PATH}"
-echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
-echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
-echo "910B kernel index=${KERNEL_INDEX}"
+# echo "===== CANN environment ====="
+# echo "CANN_ENV=${CANN_ENV}"
+# echo "CANN_ROOT=${CANN_ROOT}"
+# echo "CANN_OPP_PATH=${CANN_OPP_PATH}"
+# echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-}"
+# echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-}"
+# echo "910B kernel index=${KERNEL_INDEX}"
 
 # ==============================
 # 2. HuggingFace offline cache
 # ==============================
 
-export HF_HOME="${HF_HOME:-/share/f50058111/huggingface_cache}"
+export HF_HOME="${HF_HOME:-/home/f50058111/huggingface_cache}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 

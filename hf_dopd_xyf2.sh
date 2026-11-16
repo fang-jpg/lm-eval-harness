@@ -103,7 +103,7 @@ PY
 
 MINDSPEED_ROOT="${MINDSPEED_ROOT:-${SCRIPT_DIR}/../MindSpeed-LLM}"
 
-DCP_MODEL_PATH="${DCP_MODEL_PATH:-/share/f50058111/model_train/dopd/qwen3_1.7b_dopd_paper_1node_8card_1019/checkpoints/global_step_150}"
+DCP_MODEL_PATH="${DCP_MODEL_PATH:-/share/f50058111/model_train/dopd/qwen3_1.7b_dopd_paper_1node_8card_1019/checkpoints/global_step_483_final}"
 HF_MODEL_PATH="${HF_MODEL_PATH:-${DCP_MODEL_PATH%/}/hf_ckpt}"
 DOPD_CONFIG="${DOPD_CONFIG:-$(dirname "$(dirname "${DCP_MODEL_PATH%/}")")/dopd_config.json}"
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-/share/f50058111/model_weights/Qwen3-1.7B/Qwen3-1.7B}"
