@@ -28,6 +28,11 @@ from tqdm import tqdm
 
 from lm_eval.api.registry import register_model
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.npu_fia_attention import (
+    NPU_HYBRID_FIA,
+    register_npu_hybrid_attention,
+    validate_npu_fia_runtime,
+)
 from lm_eval.models.npu_operator_profile import NPUOperatorProfiler
 
 
@@ -76,6 +81,7 @@ class HFDiffusionLM(HFLM):
         threshold: float | str = 0.0,
         threshold_mode: str = "scheduled",
         denoise_cache_mode: str = "block_reference",
+        denoise_attention_backend: str = "eager",
         max_denoising_steps_per_block: int | str | None = None,
         trace_requests_per_rank: int | str = 0,
         trace_blocks_per_request: int | str = 0,
@@ -100,6 +106,9 @@ class HFDiffusionLM(HFLM):
         self.threshold = float(threshold)
         self.threshold_mode = str(threshold_mode).strip().lower()
         self.denoise_cache_mode = str(denoise_cache_mode).strip().lower()
+        self.denoise_attention_backend = (
+            str(denoise_attention_backend).strip().lower()
+        )
         self.max_denoising_steps_per_block = _as_optional_int(
             max_denoising_steps_per_block
         )
@@ -117,10 +126,12 @@ class HFDiffusionLM(HFLM):
         self._metrics_dir = os.environ.get("HF_DIFFUSION_METRICS_DIR")
 
         self._validate_diffusion_args()
-        # HFLM loads its inspection config and model config separately.  This
-        # kwarg must reach AutoModelForCausalLM.from_pretrained directly;
-        # changing only self._config would leave the real model on SDPA.
-        kwargs["attn_implementation"] = "eager"
+        self._attention_implementation = "eager"
+        if self.denoise_attention_backend == "npu_fia":
+            self._attention_implementation = register_npu_hybrid_attention()
+        # HFLM loads its inspection config and model config separately. This
+        # kwarg must reach AutoModelForCausalLM.from_pretrained directly.
+        kwargs["attn_implementation"] = self._attention_implementation
         super().__init__(*args, **kwargs)
         self._npu_operator_profiler = NPUOperatorProfiler(
             backend="diffusion", rank=int(self.rank)
@@ -131,11 +142,19 @@ class HFDiffusionLM(HFLM):
                 "hf-diffusion only supports decoder-only causal-LM checkpoints."
             )
         actual_attention = getattr(self.model.config, "_attn_implementation", None)
-        if actual_attention != "eager":
+        if actual_attention != self._attention_implementation:
             raise RuntimeError(
-                "hf-diffusion requires eager attention, but the loaded model uses "
-                f"{actual_attention!r}."
+                "hf-diffusion loaded an unexpected attention implementation: "
+                f"expected {self._attention_implementation!r}, "
+                f"found {actual_attention!r}."
             )
+        if self.denoise_attention_backend == "npu_fia":
+            if self.device.type != "npu":
+                raise RuntimeError(
+                    "denoise_attention_backend=npu_fia requires an NPU device, "
+                    f"found {self.device}."
+                )
+            validate_npu_fia_runtime()
 
         configured_mask_id = getattr(self.config, "mask_token_id", None)
         tokenizer_mask_id = getattr(self.tokenizer, "mask_token_id", None)
@@ -159,22 +178,24 @@ class HFDiffusionLM(HFLM):
         eval_logger.info(
             "Initialized hf-diffusion: mask_token_id=%d, block_length=%d, "
             "diffusion_steps=%s, threshold=%.4f, threshold_mode=%s, "
-            "denoise_cache_mode=%s, max_denoising_steps_per_block=%s, mc_num=%d",
+            "denoise_cache_mode=%s, denoise_attention_backend=%s, "
+            "max_denoising_steps_per_block=%s, mc_num=%d",
             self.mask_token_id,
             self.block_length,
             self.diffusion_steps,
             self.threshold,
             self.threshold_mode,
             self.denoise_cache_mode,
+            self.denoise_attention_backend,
             self.max_denoising_steps_per_block,
             self.mc_num,
         )
 
     def _get_config(self, *args, **kwargs) -> None:
-        """Load the HF config and force the 4D-mask-compatible eager backend."""
+        """Load the HF config with the selected 4D-mask-compatible backend."""
         super()._get_config(*args, **kwargs)
-        self._config._attn_implementation = "eager"
-        self._config.attn_implementation = "eager"
+        self._config._attn_implementation = self._attention_implementation
+        self._config.attn_implementation = self._attention_implementation
         if self._requested_mask_token_id is not None:
             self._config.mask_token_id = self._requested_mask_token_id
 
@@ -197,6 +218,10 @@ class HFDiffusionLM(HFLM):
             raise ValueError(
                 "denoise_cache_mode must be 'per_step_deepcopy', 'block_crop', "
                 "or 'block_reference'."
+            )
+        if self.denoise_attention_backend not in {"eager", "npu_fia"}:
+            raise ValueError(
+                "denoise_attention_backend must be 'eager' or 'npu_fia'."
             )
         if self.max_denoising_steps_per_block is not None:
             if self.max_denoising_steps_per_block <= 0:
@@ -396,6 +421,7 @@ class HFDiffusionLM(HFLM):
                         self.max_denoising_steps_per_block
                     ),
                     "denoise_cache_mode": self.denoise_cache_mode,
+                    "denoise_attention_backend": self.denoise_attention_backend,
                     "trace_requests_per_rank": self.trace_requests_per_rank,
                     "trace_blocks_per_request": self.trace_blocks_per_request,
                     "diffusion_temperature": self.diffusion_temperature,
@@ -822,6 +848,11 @@ class HFDiffusionLM(HFLM):
                             cache_position=cache_position,
                             use_cache=True,
                             return_dict=True,
+                            **(
+                                {"diffusion_bidirectional": True}
+                                if self.denoise_attention_backend == "npu_fia"
+                                else {}
+                            ),
                         )
                 denoise_cache = denoise.past_key_values
                 with self._npu_operator_profiler.region(

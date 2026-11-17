@@ -146,6 +146,14 @@ THRESHOLD_MODE="${THRESHOLD_MODE:-scheduled}"
 # per_step_deepcopy: original baseline, clone the full persistent KV before
 # every denoise. block_crop and block_reference are the two optimized variants.
 DENOISE_CACHE_MODE="${DENOISE_CACHE_MODE:-block_reference}"
+# eager preserves the reference attention path. npu_fia replaces only the
+# bidirectional denoise attention-score computation with Ascend FIA v1.
+DENOISE_ATTENTION_BACKEND="${DENOISE_ATTENTION_BACKEND:-eager}"
+if [[ "${DENOISE_ATTENTION_BACKEND}" != "eager" && \
+      "${DENOISE_ATTENTION_BACKEND}" != "npu_fia" ]]; then
+  echo "DENOISE_ATTENTION_BACKEND must be eager or npu_fia: ${DENOISE_ATTENTION_BACKEND}" >&2
+  exit 2
+fi
 MAX_DENOISING_STEPS_PER_BLOCK="${MAX_DENOISING_STEPS_PER_BLOCK:-}"
 # Probability traces are intentionally bounded because a full GSM8K trace is
 # very large. These limits apply independently on every rank.
@@ -166,7 +174,7 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
 # Bump this whenever decoding semantics or the timed execution path changes so
 # a benchmark cannot reuse responses produced by an older implementation.
-DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-cache-ablation-v8}"
+DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-denoise-fia-v9}"
 # Total attempts, including the first one.  A retry only computes responses
 # still missing from each rank-local cache, so an extra attempt is inexpensive
 # and covers a slow rank that needs more than one timeout window to catch up.
@@ -181,9 +189,12 @@ fi
 # Importing torch_npu is not enough to prove that the operator package is
 # configured.  This is the exact dtype conversion that previously failed in
 # hf_diffusion.py at attention_mask.bool(); run it before loading eight models.
+export DENOISE_ATTENTION_BACKEND
 "${PYTHON_BIN}" - <<'PY'
+import os
+
 import torch
-import torch_npu  # noqa: F401
+import torch_npu
 
 if not torch.npu.is_available():
     raise SystemExit("[CANN] NPU is unavailable; check CANN_ENV and torch_npu.")
@@ -192,15 +203,45 @@ try:
     torch.npu.set_device(0)
     attention_mask = torch.tensor([[1, 0]], dtype=torch.int64, device="npu:0")
     attention_mask.bool()
+    if os.environ["DENOISE_ATTENTION_BACKEND"] == "npu_fia":
+        operation = getattr(torch_npu, "npu_fused_infer_attention_score", None)
+        if not callable(operation):
+            raise RuntimeError(
+                "torch_npu does not provide npu_fused_infer_attention_score"
+            )
+        query = torch.randn(1, 4, 4, 128, device="npu:0").to(torch.bfloat16)
+        key = torch.randn(1, 2, 8, 128, device="npu:0").to(torch.bfloat16)
+        value = torch.randn(1, 2, 8, 128, device="npu:0").to(torch.bfloat16)
+        output, _ = operation(
+            query=query,
+            key=key,
+            value=value,
+            atten_mask=None,
+            actual_seq_lengths=[4],
+            actual_seq_lengths_kv=[8],
+            num_heads=4,
+            num_key_value_heads=2,
+            input_layout="BNSD",
+            scale=128**-0.5,
+            pre_tokens=2_147_483_647,
+            next_tokens=2_147_483_647,
+            sparse_mode=0,
+        )
+        if output.shape != query.shape:
+            raise RuntimeError(
+                f"FIA self-check returned {output.shape}, expected {query.shape}"
+            )
     torch.npu.synchronize()
 except Exception as exc:
     raise SystemExit(
-        "[CANN] NPU Cast self-check failed. "
+        "[CANN] NPU self-check failed. "
         "Check CANN_OPP_PATH, file permissions, and the CANN/torch_npu version match.\n"
         f"Original error: {exc}"
     ) from exc
 
 print(f"[CANN] NPU Cast self-check passed (torch={torch.__version__}).")
+if os.environ["DENOISE_ATTENTION_BACKEND"] == "npu_fia":
+    print("[CANN] FusedInferAttentionScore self-check passed.")
 PY
 
 RUN_NAME="$(basename "${MODEL_PATH%/}")"
@@ -265,7 +306,7 @@ if [[ "${THRESHOLD_MODE}" == "strict" ]]; then
   fi
 fi
 
-MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},ignore_eos=${IGNORE_EOS},threshold=${THRESHOLD},threshold_mode=${THRESHOLD_MODE},denoise_cache_mode=${DENOISE_CACHE_MODE},trace_requests_per_rank=${TRACE_REQUESTS_PER_RANK},trace_blocks_per_request=${TRACE_BLOCKS_PER_REQUEST},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
+MODEL_ARGS="pretrained=${MODEL_PATH},tokenizer=${MODEL_PATH},local_files_only=True,trust_remote_code=True,dtype=bfloat16,block_length=${BLOCK_LENGTH},diffusion_temperature=${DIFFUSION_TEMPERATURE},ignore_eos=${IGNORE_EOS},threshold=${THRESHOLD},threshold_mode=${THRESHOLD_MODE},denoise_cache_mode=${DENOISE_CACHE_MODE},denoise_attention_backend=${DENOISE_ATTENTION_BACKEND},trace_requests_per_rank=${TRACE_REQUESTS_PER_RANK},trace_blocks_per_request=${TRACE_BLOCKS_PER_REQUEST},top_k=${TOP_K},top_p=${TOP_P},mc_num=${MC_NUM},mc_batch_size=${MC_BATCH_SIZE},seed=${SEED}"
 if [[ -n "${DIFFUSION_STEPS}" ]]; then
   MODEL_ARGS+=",diffusion_steps=${DIFFUSION_STEPS}"
 fi
@@ -339,6 +380,7 @@ run_task() {
   echo "Ignore EOS : ${IGNORE_EOS}"
   echo "Thresh mode: ${THRESHOLD_MODE}"
   echo "Cache mode : ${DENOISE_CACHE_MODE}"
+  echo "Attn mode  : ${DENOISE_ATTENTION_BACKEND}"
   echo "Max steps/B: ${MAX_DENOISING_STEPS_PER_BLOCK:-n/a}"
   echo "Trace      : ${TRACE_REQUESTS_PER_RANK} request(s)/rank, ${TRACE_BLOCKS_PER_REQUEST} block(s)/request"
   echo "Log file   : ${log_file}"

@@ -134,3 +134,29 @@ the safer device-active comparison.
 
 Do not compare profiled tok/s with normal tok/s: profiling adds synchronization
 and trace overhead. Use the trace only to explain normal-run timings.
+
+## Diffusion denoise attention A/B
+
+`hf_diffusion_xyf2.sh` keeps eager attention as the default reference path.
+Set `DENOISE_ATTENTION_BACKEND=npu_fia` to replace only bidirectional denoise
+attention with Ascend `FusedInferAttentionScore`; prompt prefill, causal refresh
+and diffusion scoring continue through Qwen3 eager attention.
+
+Run the profiling wrapper twice with distinct roots and otherwise identical
+settings:
+
+```bash
+DENOISE_ATTENTION_BACKEND=eager \
+PROFILE_ROOT=/share/f50058111/operator_profiles_attention_eager \
+bash profile_ar_diffusion_operators.sh
+
+DENOISE_ATTENTION_BACKEND=npu_fia \
+PROFILE_ROOT=/share/f50058111/operator_profiles_attention_fia \
+bash profile_ar_diffusion_operators.sh
+```
+
+Compare the two diffusion requests and denoise stages with
+`scripts/summarize_npu_profile.py`. The FIA denoise trace should contain
+`FusedInferAttentionScore` and reduce separate `BatchMatMul`, `Softmax`, and
+GQA-expansion operators. Use ordinary non-profiled GSM8K summaries for the
+actual end-to-end latency and throughput comparison.

@@ -60,6 +60,7 @@ def _make_lm(model, *, mc_num=8, mc_batch_size=4):
     lm.ignore_eos = False
     lm.threshold_mode = "scheduled"
     lm.denoise_cache_mode = "block_reference"
+    lm.denoise_attention_backend = "eager"
     lm.max_denoising_steps_per_block = None
     lm.trace_requests_per_rank = 0
     lm.trace_blocks_per_request = 0
@@ -85,6 +86,7 @@ def test_strict_threshold_requires_enough_steps_for_one_token_progress():
     lm.threshold = 0.8
     lm.threshold_mode = "strict"
     lm.denoise_cache_mode = "block_reference"
+    lm.denoise_attention_backend = "eager"
     lm.max_denoising_steps_per_block = 6
     lm.trace_requests_per_rank = 0
     lm.trace_blocks_per_request = 0
@@ -101,6 +103,11 @@ def test_strict_threshold_requires_enough_steps_for_one_token_progress():
 
     lm.denoise_cache_mode = "invalid"
     with pytest.raises(ValueError, match="denoise_cache_mode"):
+        lm._validate_diffusion_args()
+
+    lm.denoise_cache_mode = "block_reference"
+    lm.denoise_attention_backend = "invalid"
+    with pytest.raises(ValueError, match="denoise_attention_backend"):
         lm._validate_diffusion_args()
 
 
@@ -470,4 +477,5 @@ def test_constructor_forces_eager_attention_on_loaded_checkpoint(tmp_path):
     )
 
     assert lm.model.config._attn_implementation == "eager"
+    assert lm.denoise_attention_backend == "eager"
     assert lm.mask_token_id == 3
