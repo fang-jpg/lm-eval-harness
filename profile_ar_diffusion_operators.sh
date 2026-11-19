@@ -34,8 +34,9 @@ if [[ "${THRESHOLD_MODE}" != "strict" ]]; then
   MAX_DENOISING_STEPS_PER_BLOCK=""
 fi
 if [[ "${DENOISE_ATTENTION_BACKEND}" != "eager" && \
-      "${DENOISE_ATTENTION_BACKEND}" != "npu_fia" ]]; then
-  echo "DENOISE_ATTENTION_BACKEND must be eager or npu_fia: ${DENOISE_ATTENTION_BACKEND}" >&2
+      "${DENOISE_ATTENTION_BACKEND}" != "npu_fia" && \
+      "${DENOISE_ATTENTION_BACKEND}" != "npu_fia_phased" ]]; then
+  echo "DENOISE_ATTENTION_BACKEND must be eager, npu_fia, or npu_fia_phased: ${DENOISE_ATTENTION_BACKEND}" >&2
   exit 2
 fi
 
@@ -43,6 +44,7 @@ fi
 # defaults sample approximately the same generated position (~token 128) for
 # AR and B=4 diffusion. Override them for another block/threshold setting.
 AR_DECODE_OCCURRENCE="${AR_DECODE_OCCURRENCE:-127}"
+DIFFUSION_PREFILL_OCCURRENCE="${DIFFUSION_PREFILL_OCCURRENCE:-0}"
 DIFFUSION_DENOISE_OCCURRENCE="${DIFFUSION_DENOISE_OCCURRENCE:-56}"
 DIFFUSION_REFRESH_OCCURRENCE="${DIFFUSION_REFRESH_OCCURRENCE:-31}"
 # Match the cache-copy occurrence to approximately generated token 128 in each
@@ -179,6 +181,7 @@ fi
 
 if [[ "${RUN_STAGE_PROFILES}" == "1" ]]; then
   run_ar_profile ar_decode_forward "${AR_DECODE_OCCURRENCE}" ar_decode
+  run_diffusion_profile diffusion_prefill_forward "${DIFFUSION_PREFILL_OCCURRENCE}" diffusion_prefill
   run_diffusion_profile diffusion_denoise_forward "${DIFFUSION_DENOISE_OCCURRENCE}" diffusion_denoise
   run_diffusion_profile diffusion_causal_refresh_forward "${DIFFUSION_REFRESH_OCCURRENCE}" diffusion_refresh
   run_diffusion_profile diffusion_cache_copy "${DIFFUSION_CACHE_COPY_OCCURRENCE}" diffusion_cache_copy
@@ -188,6 +191,7 @@ if [[ "${RUN_STAGE_PROFILES}" == "1" ]]; then
   run_diffusion_profile diffusion_sample_and_select "${DIFFUSION_SAMPLE_OCCURRENCE}" diffusion_sample
   SUMMARY_ARGS+=(
     --profile "ar_decode=${PROFILE_ROOT}/ar_decode/trace"
+    --profile "diffusion_prefill=${PROFILE_ROOT}/diffusion_prefill/trace"
     --profile "diffusion_denoise=${PROFILE_ROOT}/diffusion_denoise/trace"
     --profile "diffusion_refresh=${PROFILE_ROOT}/diffusion_refresh/trace"
     --profile "diffusion_cache_copy=${PROFILE_ROOT}/diffusion_cache_copy/trace"

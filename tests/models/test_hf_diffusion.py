@@ -101,6 +101,10 @@ def test_strict_threshold_requires_enough_steps_for_one_token_progress():
     lm.max_denoising_steps_per_block = 7
     lm._validate_diffusion_args()
 
+    lm.denoise_attention_backend = "npu_fia_phased"
+    lm._validate_diffusion_args()
+    lm.denoise_attention_backend = "eager"
+
     lm.denoise_cache_mode = "invalid"
     with pytest.raises(ValueError, match="denoise_cache_mode"):
         lm._validate_diffusion_args()

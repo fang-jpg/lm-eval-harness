@@ -127,7 +127,7 @@ class HFDiffusionLM(HFLM):
 
         self._validate_diffusion_args()
         self._attention_implementation = "eager"
-        if self.denoise_attention_backend == "npu_fia":
+        if self.denoise_attention_backend in {"npu_fia", "npu_fia_phased"}:
             self._attention_implementation = register_npu_hybrid_attention()
         # HFLM loads its inspection config and model config separately. This
         # kwarg must reach AutoModelForCausalLM.from_pretrained directly.
@@ -148,13 +148,18 @@ class HFDiffusionLM(HFLM):
                 f"expected {self._attention_implementation!r}, "
                 f"found {actual_attention!r}."
             )
-        if self.denoise_attention_backend == "npu_fia":
+        if self.denoise_attention_backend in {"npu_fia", "npu_fia_phased"}:
             if self.device.type != "npu":
                 raise RuntimeError(
-                    "denoise_attention_backend=npu_fia requires an NPU device, "
+                    "The selected NPU attention backend requires an NPU device, "
                     f"found {self.device}."
                 )
-            validate_npu_fia_runtime()
+            validate_npu_fia_runtime(
+                self.device,
+                prepare_causal_mask=(
+                    self.denoise_attention_backend == "npu_fia_phased"
+                ),
+            )
 
         configured_mask_id = getattr(self.config, "mask_token_id", None)
         tokenizer_mask_id = getattr(self.tokenizer, "mask_token_id", None)
@@ -219,9 +224,14 @@ class HFDiffusionLM(HFLM):
                 "denoise_cache_mode must be 'per_step_deepcopy', 'block_crop', "
                 "or 'block_reference'."
             )
-        if self.denoise_attention_backend not in {"eager", "npu_fia"}:
+        if self.denoise_attention_backend not in {
+            "eager",
+            "npu_fia",
+            "npu_fia_phased",
+        }:
             raise ValueError(
-                "denoise_attention_backend must be 'eager' or 'npu_fia'."
+                "denoise_attention_backend must be 'eager', 'npu_fia', or "
+                "'npu_fia_phased'."
             )
         if self.max_denoising_steps_per_block is not None:
             if self.max_denoising_steps_per_block <= 0:
@@ -725,6 +735,17 @@ class HFDiffusionLM(HFLM):
                     input_ids=prompt_ids,
                     use_cache=True,
                     return_dict=True,
+                    **(
+                        {
+                            # SDPA applies causality internally. Passing the
+                            # layer mapping avoids materializing an additive
+                            # causal mask before the custom attention call.
+                            "attention_mask": self._bidirectional_mask(),
+                            "diffusion_attention_phase": "prefill",
+                        }
+                        if self.denoise_attention_backend == "npu_fia_phased"
+                        else {}
+                    ),
                 )
         past_key_values = prefill.past_key_values
         next_token_confidence, next_token = self._sample(
@@ -849,8 +870,9 @@ class HFDiffusionLM(HFLM):
                             use_cache=True,
                             return_dict=True,
                             **(
-                                {"diffusion_bidirectional": True}
-                                if self.denoise_attention_backend == "npu_fia"
+                                {"diffusion_attention_phase": "denoise"}
+                                if self.denoise_attention_backend
+                                in {"npu_fia", "npu_fia_phased"}
                                 else {}
                             ),
                         )
@@ -972,6 +994,17 @@ class HFDiffusionLM(HFLM):
                         cache_position=cache_position,
                         use_cache=True,
                         return_dict=True,
+                        **(
+                            {
+                                # FIA sparse_mode=3 owns causality and uses a
+                                # shared compressed mask, so skip the dynamic
+                                # Transformers additive-mask construction.
+                                "attention_mask": self._bidirectional_mask(),
+                                "diffusion_attention_phase": "causal_refresh",
+                            }
+                            if self.denoise_attention_backend == "npu_fia_phased"
+                            else {}
+                        ),
                     )
             past_key_values = causal.past_key_values
             if block_index + 1 < num_blocks:

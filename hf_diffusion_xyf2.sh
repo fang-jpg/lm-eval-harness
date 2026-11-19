@@ -146,12 +146,14 @@ THRESHOLD_MODE="${THRESHOLD_MODE:-scheduled}"
 # per_step_deepcopy: original baseline, clone the full persistent KV before
 # every denoise. block_crop and block_reference are the two optimized variants.
 DENOISE_CACHE_MODE="${DENOISE_CACHE_MODE:-block_reference}"
-# eager preserves the reference attention path. npu_fia replaces only the
-# bidirectional denoise attention-score computation with Ascend FIA v1.
+# eager preserves the reference path. npu_fia replaces only bidirectional
+# denoise. npu_fia_phased also routes prefill through SDPA/FlashAttentionScore
+# and causal refresh through right-down causal FIA.
 DENOISE_ATTENTION_BACKEND="${DENOISE_ATTENTION_BACKEND:-eager}"
 if [[ "${DENOISE_ATTENTION_BACKEND}" != "eager" && \
-      "${DENOISE_ATTENTION_BACKEND}" != "npu_fia" ]]; then
-  echo "DENOISE_ATTENTION_BACKEND must be eager or npu_fia: ${DENOISE_ATTENTION_BACKEND}" >&2
+      "${DENOISE_ATTENTION_BACKEND}" != "npu_fia" && \
+      "${DENOISE_ATTENTION_BACKEND}" != "npu_fia_phased" ]]; then
+  echo "DENOISE_ATTENTION_BACKEND must be eager, npu_fia, or npu_fia_phased: ${DENOISE_ATTENTION_BACKEND}" >&2
   exit 2
 fi
 MAX_DENOISING_STEPS_PER_BLOCK="${MAX_DENOISING_STEPS_PER_BLOCK:-}"
@@ -174,7 +176,7 @@ MODEL_DEVICE="${MODEL_DEVICE:-}"
 RESPONSE_CACHE_ROOT="${RESPONSE_CACHE_ROOT:-${OUTPUT_ROOT}/response_cache}"
 # Bump this whenever decoding semantics or the timed execution path changes so
 # a benchmark cannot reuse responses produced by an older implementation.
-DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-denoise-fia-v9}"
+DECODER_CACHE_VERSION="${DECODER_CACHE_VERSION:-hybrid-phased-fia-v10}"
 # Total attempts, including the first one.  A retry only computes responses
 # still missing from each rank-local cache, so an extra attempt is inexpensive
 # and covers a slow rank that needs more than one timeout window to catch up.
@@ -192,9 +194,11 @@ fi
 export DENOISE_ATTENTION_BACKEND
 "${PYTHON_BIN}" - <<'PY'
 import os
+from types import SimpleNamespace
 
 import torch
 import torch_npu
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
 if not torch.npu.is_available():
     raise SystemExit("[CANN] NPU is unavailable; check CANN_ENV and torch_npu.")
@@ -203,7 +207,8 @@ try:
     torch.npu.set_device(0)
     attention_mask = torch.tensor([[1, 0]], dtype=torch.int64, device="npu:0")
     attention_mask.bool()
-    if os.environ["DENOISE_ATTENTION_BACKEND"] == "npu_fia":
+    backend = os.environ["DENOISE_ATTENTION_BACKEND"]
+    if backend in {"npu_fia", "npu_fia_phased"}:
         operation = getattr(torch_npu, "npu_fused_infer_attention_score", None)
         if not callable(operation):
             raise RuntimeError(
@@ -231,6 +236,106 @@ try:
             raise RuntimeError(
                 f"FIA self-check returned {output.shape}, expected {query.shape}"
             )
+        if backend == "npu_fia_phased":
+            compressed_mask = torch.triu(
+                torch.ones((2048, 2048), dtype=torch.bool, device="npu:0"),
+                diagonal=1,
+            ).contiguous()
+            causal_output, _ = operation(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=compressed_mask,
+                actual_seq_lengths=[4],
+                actual_seq_lengths_kv=[8],
+                num_heads=4,
+                num_key_value_heads=2,
+                input_layout="BNSD",
+                scale=128**-0.5,
+                pre_tokens=2_147_483_647,
+                next_tokens=0,
+                sparse_mode=3,
+            )
+            if causal_output.shape != query.shape:
+                raise RuntimeError(
+                    "Causal FIA self-check returned "
+                    f"{causal_output.shape}, expected {query.shape}"
+                )
+            expanded_key = key.repeat_interleave(2, dim=1)
+            expanded_value = value.repeat_interleave(2, dim=1)
+            causal_scores = (
+                torch.matmul(
+                    query.float(), expanded_key.float().transpose(2, 3)
+                )
+                * 128**-0.5
+            )
+            query_positions = torch.arange(4, 8, device="npu:0")[:, None]
+            key_positions = torch.arange(8, device="npu:0")[None, :]
+            future_mask = key_positions > query_positions
+            causal_weights = torch.softmax(
+                causal_scores.masked_fill(
+                    future_mask[None, None], -torch.inf
+                ),
+                dim=-1,
+            ).to(value.dtype)
+            causal_reference = torch.matmul(
+                causal_weights, expanded_value
+            )
+            incremental_output, _ = operation(
+                query=query[:, :, :1, :].contiguous(),
+                key=key,
+                value=value,
+                atten_mask=None,
+                actual_seq_lengths=[1],
+                actual_seq_lengths_kv=[8],
+                num_heads=4,
+                num_key_value_heads=2,
+                input_layout="BNSD",
+                scale=128**-0.5,
+                pre_tokens=2_147_483_647,
+                next_tokens=2_147_483_647,
+                sparse_mode=0,
+            )
+            incremental_scores = (
+                torch.matmul(
+                    query[:, :, :1, :].float(),
+                    expanded_key.float().transpose(2, 3),
+                )
+                * 128**-0.5
+            )
+            incremental_reference = torch.matmul(
+                torch.softmax(incremental_scores, dim=-1).to(value.dtype),
+                expanded_value,
+            )
+            prefill_key = key[:, :, :4, :].contiguous()
+            prefill_value = value[:, :, :4, :].contiguous()
+            sdpa_output, _ = sdpa_attention_forward(
+                SimpleNamespace(num_key_value_groups=2, is_causal=True),
+                query,
+                prefill_key,
+                prefill_value,
+                attention_mask=None,
+                is_causal=True,
+                scaling=128**-0.5,
+            )
+            if sdpa_output.shape != query.shape:
+                raise RuntimeError(
+                    f"SDPA self-check returned {sdpa_output.shape}, "
+                    f"expected {query.shape}"
+                )
+            torch.npu.synchronize()
+            torch.testing.assert_close(
+                causal_output.float().cpu(),
+                causal_reference.float().cpu(),
+                rtol=3e-2,
+                atol=3e-2,
+            )
+            torch.testing.assert_close(
+                incremental_output.float().cpu(),
+                incremental_reference.float().cpu(),
+                rtol=3e-2,
+                atol=3e-2,
+            )
     torch.npu.synchronize()
 except Exception as exc:
     raise SystemExit(
@@ -240,8 +345,10 @@ except Exception as exc:
     ) from exc
 
 print(f"[CANN] NPU Cast self-check passed (torch={torch.__version__}).")
-if os.environ["DENOISE_ATTENTION_BACKEND"] == "npu_fia":
+if os.environ["DENOISE_ATTENTION_BACKEND"] in {"npu_fia", "npu_fia_phased"}:
     print("[CANN] FusedInferAttentionScore self-check passed.")
+if os.environ["DENOISE_ATTENTION_BACKEND"] == "npu_fia_phased":
+    print("[CANN] Causal/incremental FIA and causal SDPA self-checks passed.")
 PY
 
 RUN_NAME="$(basename "${MODEL_PATH%/}")"
